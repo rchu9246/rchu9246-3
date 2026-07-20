@@ -406,7 +406,7 @@ def main():
         chg_pct = (sd["change"] / (sd["close"] - sd["change"]) * 100) if (sd["close"] - sd["change"]) else 0
         daily_rows.append({
             "code": code, "name": sd["name"], "trade_date": TODAY,
-            "close": sd["close"], "chg_pct": round(chg_pct, 2), "volume": sd["volume"],
+            "close": sd["close"], "chg_pct": round(chg_pct, 2), "volume": int(sd["volume"]),
             "foreign_net": inst.get("foreign_net"), "trust_net": inst.get("trust_net"),
             "dealer_net": inst.get("dealer_net"), "institutional_net": inst.get("institutional_net"),
         })
