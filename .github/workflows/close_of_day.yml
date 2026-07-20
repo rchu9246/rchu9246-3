@@ -1,0 +1,22 @@
+name: 收盤後訊號計算
+
+on:
+  schedule:
+    - cron: '40 7 * * 1-5'
+  workflow_dispatch: {}
+
+jobs:
+  compute:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 執行收盤後計算與寫入 Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python scripts/fetch_and_score.py
