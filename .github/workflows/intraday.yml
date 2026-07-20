@@ -1,0 +1,34 @@
+name: 盤中即時報價更新
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 判斷是否在台股交易時段（週一到週五 09:00-13:30 台北時間 = UTC 01:00-05:30）
+        id: gate
+        run: |
+          hour_min=$(TZ='Asia/Taipei' date +%H%M)
+          weekday=$(TZ='Asia/Taipei' date +%u)
+          if [ "$weekday" -ge 1 ] && [ "$weekday" -le 5 ] && [ "$hour_min" -ge 0900 ] && [ "$hour_min" -le 1330 ]; then
+            echo "in_session=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "in_session=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 更新即時報價
+        if: steps.gate.outputs.in_session == 'true'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python scripts/fetch_realtime.py
