@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>台股訊號儀表板</title>
+<style>
+  :root{
+    --bg:#f5f6f8;
+    --panel:#ffffff;
+    --line:#e3e6ea;
+    --ink:#1c2430;
+    --sub:#6b7684;
+    --up:#d1443a;
+    --down:#1f9254;
+    --accent:#2456c4;
+    --accent-soft:#eaf0ff;
+    --amber:#b9820a;
+    --amber-soft:#fff6df;
+    --red-strong:#c62828;
+    --red-soft:#fdeaea;
+    --green-soft:#e9f7ef;
+    --purple:#7b4fd6;
+    --purple-soft:#f2ecfd;
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --sans: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    font-family:var(--sans);
+    background:var(--bg);
+    color:var(--ink);
+    font-size:13px;
+    -webkit-font-smoothing:antialiased;
+  }
+  .topbar{
+    background:var(--panel);
+    border-bottom:1px solid var(--line);
+    padding:10px 16px;
+    display:flex;
+    flex-wrap:wrap;
+    align-items:center;
+    gap:18px;
+  }
+  .ctrl{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--sub);}
+  .ctrl select, .ctrl input[type=number]{
+    border:1px solid var(--line);
+    border-radius:6px;
+    padding:4px 8px;
+    font-size:12.5px;
+    color:var(--ink);
+    background:#fff;
+  }
+  .banks{display:flex;flex-wrap:wrap;gap:10px;align-items:center;}
+  .banks label{display:flex;align-items:center;gap:4px;font-size:12.5px;color:var(--ink);white-space:nowrap;}
+  .refresh-btn{
+    margin-left:auto;
+    background:var(--accent);
+    color:#fff;
+    border:none;
+    border-radius:6px;
+    padding:7px 16px;
+    font-size:12.5px;
+    font-weight:600;
+    cursor:pointer;
+  }
+  .refresh-btn:hover{background:#1d45a5;}
+
+  .status-line{
+    padding:7px 16px;
+    background:var(--green-soft);
+    color:#1f6b3e;
+    font-size:12.5px;
+    border-bottom:1px solid var(--line);
+    display:flex;
+    gap:18px;
+    flex-wrap:wrap;
+  }
+  .status-line b{font-weight:700;}
+
+  .tabs{
+    display:flex;
+    overflow-x:auto;
+    background:var(--panel);
+    border-bottom:1px solid var(--line);
+    padding:0 8px;
+  }
+  .tab{
+    padding:10px 14px;
+    font-size:12.5px;
+    white-space:nowrap;
+    cursor:pointer;
+    color:var(--sub);
+    border-bottom:2px solid transparent;
+    display:flex;
+    align-items:center;
+    gap:5px;
+  }
+  .tab:hover{color:var(--ink);}
+  .tab.active{color:var(--accent);border-bottom-color:var(--accent);font-weight:700;background:var(--accent-soft);}
+
+  .page{display:none;padding:16px;}
+  .page.active{display:block;}
+
+  .page-title{font-size:19px;font-weight:800;margin:0 0 10px 0;display:flex;align-items:center;gap:8px;}
+  .subtitle-box{
+    background:#fffbea;
+    border:1px solid #f0e0a6;
+    border-radius:8px;
+    padding:10px 14px;
+    font-size:12.5px;
+    color:#7a5c00;
+    margin-bottom:10px;
+    line-height:1.6;
+  }
+  .stat-box{
+    background:var(--green-soft);
+    border:1px solid #c8e8d4;
+    border-radius:8px;
+    padding:9px 14px;
+    font-size:12.5px;
+    color:#1f6b3e;
+    margin-bottom:10px;
+  }
+  .stat-box.red{background:var(--red-soft);border-color:#f0c6c3;color:#a53a33;}
+  .stat-box.blue{background:var(--accent-soft);border-color:#c8d7f5;color:#1d3f8f;}
+
+  .filter-row{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    flex-wrap:wrap;
+    margin-bottom:12px;
+  }
+  .chip{
+    border:1px solid var(--line);
+    background:#fff;
+    border-radius:16px;
+    padding:6px 14px;
+    font-size:12.5px;
+    cursor:pointer;
+    color:var(--ink);
+    display:flex;
+    align-items:center;
+    gap:5px;
+  }
+  .chip.active{background:var(--accent);color:#fff;border-color:var(--accent);}
+  .filter-meta{margin-left:auto;font-size:12.5px;color:var(--sub);display:flex;gap:14px;flex-wrap:wrap;}
+  .filter-meta b{color:var(--ink);}
+
+  table{
+    width:100%;
+    border-collapse:collapse;
+    background:var(--panel);
+    border-radius:8px;
+    overflow:hidden;
+    font-size:12.5px;
+  }
+  thead th{
+    background:#f0f2f5;
+    color:var(--sub);
+    font-weight:700;
+    text-align:left;
+    padding:9px 10px;
+    border-bottom:1px solid var(--line);
+    white-space:nowrap;
+    position:sticky;top:0;
+  }
+  tbody td{
+    padding:8px 10px;
+    border-bottom:1px solid var(--line);
+    white-space:nowrap;
+  }
+  tbody tr:hover{background:#f7f9fc;cursor:pointer;}
+  .num{font-family:var(--mono);}
+  .up{color:var(--up);font-weight:700;}
+  .down{color:var(--down);font-weight:700;}
+  .table-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:8px;}
+
+  .badge{
+    display:inline-flex;align-items:center;gap:4px;
+    padding:3px 9px;border-radius:5px;font-weight:700;font-size:12px;white-space:nowrap;
+  }
+  .badge.strong-bull{background:var(--red-soft);color:var(--red-strong);}
+  .badge.bull{background:#fdeeea;color:#c2542c;}
+  .badge.watch{background:var(--green-soft);color:#1f8a4c;}
+  .badge.pullback{background:var(--amber-soft);color:var(--amber);}
+  .badge.trial{background:var(--purple-soft);color:var(--purple);}
+  .badge.neutral{background:#eef0f3;color:var(--sub);}
+  .badge.avoid{background:#f1e2e2;color:#8a2f2f;}
+
+  .score-cell{
+    display:inline-block;min-width:34px;text-align:center;
+    padding:3px 0;border-radius:5px;font-weight:800;color:#fff;font-family:var(--mono);
+  }
+  .signal-tag{display:inline-block;font-size:11.5px;color:var(--sub);margin-right:6px;}
+  .footer-bar{
+    margin-top:10px;font-size:12px;color:var(--sub);
+    display:flex;gap:18px;flex-wrap:wrap;padding:8px 4px;
+  }
+  .kpi-row{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px;}
+  .kpi{
+    flex:1;min-width:140px;background:var(--panel);border:1px solid var(--line);
+    border-radius:8px;padding:10px 14px;
+  }
+  .kpi .label{font-size:11.5px;color:var(--sub);margin-bottom:4px;}
+  .kpi .value{font-size:20px;font-weight:800;font-family:var(--mono);}
+  .risk-light{
+    display:inline-flex;align-items:center;gap:6px;background:var(--red-soft);
+    color:var(--red-strong);border:1px solid #f0c6c3;border-radius:8px;padding:8px 16px;
+    font-weight:800;font-size:13.5px;float:right;
+  }
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--red-strong);display:inline-block;}
+  .risk-level{padding:3px 8px;border-radius:5px;font-weight:700;font-size:11.5px;}
+  .risk-level.high{background:var(--red-strong);color:#fff;}
+  .risk-level.warn{background:var(--amber-soft);color:var(--amber);}
+  select#bank-select-hint{display:none;}
+  .global-badge{
+    float:right;background:#eef0f3;border:1px solid var(--line);border-radius:6px;
+    padding:5px 12px;font-size:12.5px;color:var(--sub);
+  }
+  .env-block{
+    background:var(--panel);border:1px solid var(--line);border-radius:8px;
+    padding:14px;margin-bottom:14px;
+  }
+  .env-block h3{margin:0 0 8px 0;font-size:13.5px;display:flex;align-items:center;gap:6px;}
+  .taiex-strip{
+    display:flex;gap:22px;align-items:center;background:var(--accent-soft);
+    border:1px solid #c8d7f5;border-radius:8px;padding:10px 16px;margin-bottom:14px;font-size:13px;
+  }
+  .taiex-strip b{font-size:18px;font-family:var(--mono);}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="ctrl">區間：
+    <select><option>5 日</option><option>10 日</option><option>20 日</option></select>
+  </div>
+  <div class="ctrl">排序：
+    <select><option>淨買賣超張數</option><option>綜合分數</option><option>漲跌%</option></select>
+  </div>
+  <div class="ctrl">Top N：<input type="number" value="30" style="width:56px;"></div>
+  <div class="ctrl">銀行：
+    <div class="banks">
+      <label><input type="checkbox" checked>合作金庫</label>
+      <label><input type="checkbox" checked>土銀</label>
+      <label><input type="checkbox" checked>台銀</label>
+      <label><input type="checkbox" checked>臺企銀</label>
+      <label><input type="checkbox" checked>彰銀</label>
+      <label><input type="checkbox" checked>第一銀</label>
+      <label><input type="checkbox" checked>兆豐銀</label>
+      <label><input type="checkbox" checked>華南銀</label>
+    </div>
+  </div>
+  <button class="refresh-btn" onclick="refreshData()">重新整理</button>
+</div>
+
+<div class="status-line">
+  <span>資料來源：Supabase（由 scripts/fetch_and_score.py 收盤後寫入）</span>
+  <span>最後同步：<b id="sync-date">尚未載入</b></span>
+</div>
+
+<div class="tabs" id="tabs"></div>
+
+<!-- ============ PAGE 1: 訊號中心 ============ -->
+<div class="page" id="page-signal">
+  <div class="page-title">🎯 訊號中心 — 全系統漲/跌訊號彙總（雙擊跳儀表板）</div>
+  <div class="subtitle-box">
+    彙整 7 種來源 → 對每檔給「候選/避險建議」：<br>
+    🚀 強多候選 / ↗ 多頭候選 / 🟢 留意 / 🟡 觀望 / ⚡ 短線搶反彈 / ✨ 試單觀察 / ⚠ 已持有減碼 / ↘ 減碼 / 🚫 避開。這是候選排序，不是隔日開盤保證；建議欄位上 hover 看完整理由。雙擊任一行跳到 個股儀表板 看細節。
+  </div>
+  <div class="stat-box red">⚠ 隔日開盤回測與長期校準統計尚未串接——目前評分公式是簡化版規則，建議累積至少數十個交易日資料後，自行回測各候選類別的隔日勝率，再回頭調整 scripts/fetch_and_score.py 中的權重。</div>
+
+  <div class="filter-row">
+    <div class="chip active" onclick="setSigFilter(this,'all')">全部</div>
+    <div class="chip" onclick="setSigFilter(this,'bull')">💪 強多候選（淨≥3）</div>
+    <div class="chip" onclick="setSigFilter(this,'bear')">↘ 強空候選（淨≤-3）</div>
+    <div class="chip" onclick="setSigFilter(this,'conflict')">⚡ 矛盾訊號（多空都有）</div>
+    <div class="chip" onclick="setSigFilter(this,'any')">有任一訊號</div>
+    <div class="filter-meta">
+      顯示 <b id="sig-count">5117/5117</b> 檔 &nbsp;|&nbsp;
+      🚀 強多候選 <b>18</b> &nbsp;|&nbsp; ↘ 強空候選 <b>320</b> &nbsp;|&nbsp; ⚡ 矛盾 <b>456</b>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>#</th><th>代號</th><th>名稱</th><th>收盤</th><th>漲跌%</th><th>淨訊號</th>
+          <th>操作建議</th><th>多頭訊號</th><th>空頭訊號</th><th>綜合分</th>
+        </tr>
+      </thead>
+      <tbody id="signal-body"></tbody>
+    </table>
+  </div>
+  <div class="footer-bar">
+    <span>資料來源：Supabase（scripts/fetch_and_score.py 收盤後寫入）</span>
+  </div>
+</div>
+
+<!-- ============ PAGE 2: 爆發前兆雷達 ============ -->
+<div class="page" id="page-explosion">
+  <div class="page-title">🚀 爆發前兆雷達 — 收斂 → 放量 → 箱型突破</div>
+  <div class="subtitle-box">
+    以 daily_quotes 全市場資料掃描：低波動壓縮、均線收斂、20日箱型突破、爆量啟動、強勢收盤與相對強弱。此頁是技術型雷達，不會改變十勝十負分數。
+  </div>
+
+  <div class="filter-row">
+    <div class="ctrl">狀態：
+      <select id="exp-status" onchange="renderExplosion()">
+        <option value="all">全部</option>
+        <option value="confirm">爆發確認</option>
+        <option value="pre">爆發前兆</option>
+        <option value="retest">突破後回測</option>
+      </select>
+    </div>
+    <div class="ctrl">最低分：<input type="number" value="40" style="width:56px;"></div>
+    <div class="ctrl">顯示：<input type="number" value="200" style="width:56px;"></div>
+    <div class="filter-meta">
+      顯示 <b id="exp-count">200/1314</b> 檔 &nbsp;|&nbsp;
+      爆發確認 <b style="color:var(--red-strong)">15</b> &nbsp;
+      爆發前兆 <b style="color:var(--amber)">41</b> &nbsp;
+      短線風險 <b>73</b>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>#</th><th>代號</th><th>名稱</th><th>產業</th><th>狀態</th><th>階段</th><th>分數</th>
+          <th>收盤</th><th>當日%</th><th>突破%</th><th>20日箱頂</th><th>量比20</th><th>量Z60</th><th>均線收斂%</th><th>布林位階%</th>
+        </tr>
+      </thead>
+      <tbody id="explosion-body"></tbody>
+    </table>
+  </div>
+  <div class="footer-bar">
+    <span>資料來源：Supabase（scripts/fetch_and_score.py 收盤後寫入）</span>
+  </div>
+</div>
+
+<!-- ============ PAGE 3: 風險示警 ============ -->
+<div class="page" id="page-risk">
+  <div class="page-title">⚠ 風險示警
+    <span class="risk-light" id="risk-light-badge"><span class="dot"></span>燈號：載入中…</span>
+  </div>
+  <div class="subtitle-box">
+    下行與交易性風險：跌停預警 / 法人連續賣超 / 量價背離。雙擊任一行可跳儀表板（此互動尚待接上個股儀表板頁面）。
+  </div>
+
+  <div class="kpi-row">
+    <div class="kpi"><div class="label">高度風險檔數</div><div class="value" id="kpi-high">-</div></div>
+    <div class="kpi"><div class="label">警戒檔數</div><div class="value" id="kpi-warn">-</div></div>
+    <div class="kpi"><div class="label">共風險檔數</div><div class="value" id="kpi-total">-</div></div>
+  </div>
+
+  <div class="filter-row">
+    <div class="ctrl">嚴重度：
+      <select><option>警戒以上</option><option>高度風險</option><option>全部</option></select>
+    </div>
+    <div class="ctrl">風險類型：
+      <select><option>全部類型</option><option>跌停預警</option><option>法人連賣</option><option>量價背離</option></select>
+    </div>
+    <div class="filter-meta">顯示 <b id="risk-count">0/0</b> 檔</div>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>代號</th><th>名稱</th><th>風險等級</th><th>風險分</th><th>主要風險</th><th>建議動作</th>
+          <th>收盤</th><th>當日%</th><th>量比</th><th>ATR%</th><th>連賣</th><th>交易性</th><th>白話說明</th>
+        </tr>
+      </thead>
+      <tbody id="risk-body"></tbody>
+    </table>
+  </div>
+
+  <div class="page-title" style="font-size:15px;margin-top:20px;">🧯 交易性風險（流動性，尚未串接）</div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>代號</th><th>名稱</th><th>收盤</th><th>20日均量</th><th>估成交值(百萬)</th><th>100張/均量%</th><th>交易性風險</th><th>交易性</th></tr>
+      </thead>
+      <tbody id="liquidity-body"></tbody>
+    </table>
+  </div>
+
+  <div class="footer-bar">
+    <span id="risk-footer-date">資料日期：-</span>
+    <span>資料來源：Supabase risk_scores</span>
+  </div>
+</div>
+
+<!-- ============ PAGE 4: 全球資產對照 ============ -->
+<div class="page" id="page-global">
+  <div class="page-title">🌍 全球資產對照（ETF + 隔夜開盤）
+    <span class="global-badge">尚未串接國際資料源</span>
+  </div>
+  <div class="stat-box blue">💡 這一頁目前只有畫面骨架，需要你另外串接國際指數/匯率資料源（見程式註解），資料才會顯示。</div>
+
+  <div class="taiex-strip" style="display:none;">
+    🇹🇼 <b>TAIEX 收盤 -</b>
+    <span>當日 <span class="down">-</span></span>
+    <span>5日 <span class="up">+6.88%</span></span>
+    <span>20日 <span class="up">+19.34%</span></span>
+    <span>60日 <span class="up">+27.87%</span></span>
+  </div>
+
+  <div class="env-block">
+    <h3>🌙 隔夜開盤因子 (16)</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>類別</th><th>因子</th><th>代號</th><th>最新</th><th>漲跌%</th><th>對台股</th><th>影響分</th><th>時間</th><th>說明</th></tr></thead>
+        <tbody id="factor-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="env-block">
+    <h3>📈 主要股市對照 (7)</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>資產</th><th>ETF 代號</th><th>名稱</th><th>收盤</th><th>當日%</th><th>5日%</th><th>20日%</th><th>60日%</th><th>vs TAIEX (60d corr)</th><th>對標說明</th></tr></thead>
+        <tbody id="market-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="env-block">
+    <h3>🥇 原物料 / 避險 (3)</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>資產</th><th>ETF 代號</th><th>名稱</th><th>收盤</th><th>當日%</th><th>5日%</th><th>20日%</th><th>60日%</th><th>vs TAIEX (60d corr)</th><th>對標說明</th></tr></thead>
+        <tbody id="commodity-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="footer-bar">
+    <span>資料來源：Supabase（scripts/fetch_and_score.py 收盤後寫入）</span>
+  </div>
+</div>
+
+<script>
+// =====================================================
+// Supabase 連線設定 —— 請填入你自己的專案資訊
+// 在 Supabase 專案：Settings → API 可以找到這兩個值
+// 注意：這裡只能填 anon public key（唯讀），千萬不要把 service_role key 放進前端！
+// =====================================================
+const SUPABASE_URL = 'https://YOUR-PROJECT.supabase.co';
+const SUPABASE_ANON_KEY = 'YOUR-ANON-PUBLIC-KEY';
+
+async function sb(table, query = '') {
+  const url = `${SUPABASE_URL}/rest/v1/${table}?${query}`;
+  try {
+    const res = await fetch(url, {
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      },
+    });
+    if (!res.ok) throw new Error(`${table} 讀取失敗：${res.status}`);
+    return await res.json();
+  } catch (err) {
+    console.error(err);
+    return [];
+  }
+}
+
+// 取「最新交易日」的資料（每張表都用 order + limit 抓最新日期那批）
+async function sbLatest(table, orderCol = 'trade_date', limit = 500) {
+  return sb(table, `order=${orderCol}.desc,composite_score.desc.nullslast&limit=${limit}`);
+}
+
+// ---------- Tabs ----------
+const tabs = [
+  {id:'page-signal', icon:'⚡', label:'訊號'},
+  {id:'page-explosion', icon:'🚀', label:'爆發前兆'},
+  {id:'page-risk', icon:'⚠', label:'風險'},
+  {id:'page-global', icon:'🌍', label:'全球'},
+];
+const tabsEl = document.getElementById('tabs');
+tabs.forEach((t,i)=>{
+  const d = document.createElement('div');
+  d.className = 'tab' + (i===0?' active':'');
+  d.innerHTML = `${t.icon} ${t.label}`;
+  d.onclick = ()=> switchTab(t.id, d);
+  tabsEl.appendChild(d);
+});
+function switchTab(id, el){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById(id).classList.add('active');
+}
+document.getElementById('page-signal').classList.add('active');
+
+function fmtPct(v){
+  const s = v>0? '+'+v.toFixed(2) : v.toFixed(2);
+  return `<span class="${v>0?'up':(v<0?'down':'')}">${s}%</span>`;
+}
+function fmtNum(v){ return `<span class="num">${v}</span>`; }
+
+// ---------- Page 1: Signal Center ----------
+// 資料來源：Supabase signal_scores 表（由 scripts/fetch_and_score.py 收盤後寫入）
+let signalData = [];
+
+async function loadSignalData() {
+  const raw = await sbLatest('signal_scores', 'trade_date', 500);
+  signalData = raw.map(r => ({
+    code: r.code, name: r.name, close: r.close, chg: r.chg_pct,
+    net: r.net_signal, rec: r.recommendation, recTxt: r.recommendation_label,
+    stars: r.stars, bull: r.bull_tags || [], bear: r.bear_tags || [],
+    score: r.composite_score,
+  }));
+}
+function badgeClass(rec){
+  return {'strong-bull':'strong-bull','bull':'bull','watch':'watch','pullback':'pullback','trial':'trial','neutral':'neutral','avoid':'avoid'}[rec] || 'neutral';
+}
+function renderSignal(filter='all'){
+  const body = document.getElementById('signal-body');
+  if (signalData.length === 0) {
+    body.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--sub);padding:20px;">尚無資料，請確認 Supabase 連線設定與排程是否已執行過</td></tr>';
+    document.getElementById('sig-count').textContent = '0/0';
+    return;
+  }
+  body.innerHTML = '';
+  let rows = signalData;
+  if(filter==='bull') rows = rows.filter(r=>r.net>=3);
+  if(filter==='bear') rows = rows.filter(r=>r.net<=-3);
+  if(filter==='conflict') rows = rows.filter(r=>r.bull.length>0 && r.bear.length>0);
+  if(filter==='any') rows = rows.filter(r=>r.bull.length>0 || r.bear.length>0);
+  document.getElementById('sig-count').textContent = `${rows.length}/${signalData.length}`;
+  rows.forEach((r,i)=>{
+    const stars = '★'.repeat(r.stars);
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${i+1}</td>
+      <td class="num">${r.code}</td>
+      <td>${r.name}</td>
+      <td class="num">${r.close.toFixed(2)}</td>
+      <td>${fmtPct(r.chg)}</td>
+      <td><span class="badge ${r.net>=4?'strong-bull':(r.net<=-3?'avoid':'bull')}">${r.net}</span></td>
+      <td><span class="badge ${badgeClass(r.rec)}">${r.recTxt} ${stars}</span></td>
+      <td>${r.bull.map(b=>`<span class="signal-tag">🔹${b}</span>`).join('')}</td>
+      <td>${r.bear.map(b=>`<span class="signal-tag" style="color:var(--down)">🔻${b}</span>`).join('')}</td>
+      <td class="num up">+${r.score.toFixed(2)}</td>
+    `;
+    body.appendChild(tr);
+  });
+}
+function setSigFilter(el, f){
+  document.querySelectorAll('#page-signal .chip').forEach(c=>c.classList.remove('active'));
+  el.classList.add('active');
+  renderSignal(f);
+}
+
+// ---------- Page 2: Explosion Radar ----------
+// 資料來源：Supabase explosion_scores 表
+let explosionData = [];
+
+async function loadExplosionData() {
+  const raw = await sb('explosion_scores', 'order=trade_date.desc,score.desc&limit=300');
+  explosionData = raw.map(r => ({
+    code: r.code, name: r.name, industry: r.industry || '',
+    status: r.status, statusTxt: r.status_label, stage: r.stage, score: r.score,
+    close: r.close, chgDay: r.chg_pct, brk: r.breakout_pct, box: r.box_top_20d,
+    vol20: r.vol_ratio_20, volz: r.vol_z60, ma: r.ma_convergence_pct, boll: r.boll_position_pct,
+  }));
+}
+function scoreColor(s){
+  if(s>=90) return '#c62828';
+  if(s>=75) return '#d9482f';
+  if(s>=60) return '#e08a2f';
+  return '#a3a8ad';
+}
+function renderExplosion(){
+  const filter = document.getElementById('exp-status').value;
+  const body = document.getElementById('explosion-body');
+  if (explosionData.length === 0) {
+    body.innerHTML = '<tr><td colspan="15" style="text-align:center;color:var(--sub);padding:20px;">尚無資料，請確認 Supabase 連線設定與排程是否已執行過</td></tr>';
+    document.getElementById('exp-count').textContent = '0/0';
+    return;
+  }
+  body.innerHTML = '';
+  let rows = explosionData;
+  if(filter!=='all') rows = rows.filter(r=>r.status===filter);
+  document.getElementById('exp-count').textContent = `${rows.length}/${explosionData.length}`;
+  rows.forEach((r,i)=>{
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${i+1}</td>
+      <td class="num">${r.code}</td>
+      <td>${r.name}</td>
+      <td>${r.industry}</td>
+      <td><span class="badge ${r.status==='confirm'?'strong-bull':(r.status==='pre'?'pullback':'trial')}">${r.statusTxt}</span></td>
+      <td>${r.stage}</td>
+      <td><span class="score-cell" style="background:${scoreColor(r.score)}">${r.score}</span></td>
+      <td class="num">${r.close.toFixed(2)}</td>
+      <td>${fmtPct(r.chgDay)}</td>
+      <td>${fmtPct(r.brk)}</td>
+      <td class="num">${r.box.toFixed(2)}</td>
+      <td class="num">${r.vol20.toFixed(2)}</td>
+      <td class="num">${r.volz.toFixed(2)}</td>
+      <td class="num">${r.ma.toFixed(1)}</td>
+      <td class="num">${r.boll}</td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
+// ---------- Page 3: Risk Warning ----------
+let riskData = [];
+
+async function loadRiskData() {
+  const raw = await sb('risk_scores', 'order=trade_date.desc,risk_score.desc&limit=100');
+  riskData = raw.map(r => ({
+    code: r.code, name: r.name, level: r.risk_level, score: r.risk_score,
+    risk: r.main_risk, action: r.suggested_action, close: r.close, chg: r.chg_pct,
+    vol: r.vol_ratio, atr: r.atr_pct, sell: r.consecutive_sell_days, liq: r.liquidity_score ?? '-',
+    note: r.note,
+  }));
+}
+
+function renderRisk(){
+  const body = document.getElementById('risk-body');
+  const highCount = riskData.filter(r=>r.level==='high').length;
+  const warnCount = riskData.filter(r=>r.level==='warn').length;
+  document.getElementById('kpi-high').textContent = highCount;
+  document.getElementById('kpi-warn').textContent = warnCount;
+  document.getElementById('kpi-total').textContent = riskData.length;
+  document.getElementById('risk-count').textContent = `${riskData.length}/${riskData.length}`;
+  const badge = document.getElementById('risk-light-badge');
+  if (riskData.length === 0) {
+    badge.innerHTML = '<span class="dot" style="background:var(--sub)"></span>燈號：尚無資料';
+  } else if (highCount >= 5) {
+    badge.innerHTML = '<span class="dot"></span>燈號：高度警戒';
+  } else if (highCount + warnCount >= 5) {
+    badge.innerHTML = '<span class="dot" style="background:var(--amber)"></span>燈號：警戒';
+  } else {
+    badge.innerHTML = '<span class="dot" style="background:var(--down)"></span>燈號：正常';
+  }
+  if (riskData.length === 0) {
+    body.innerHTML = '<tr><td colspan="13" style="text-align:center;color:var(--sub);padding:20px;">尚無資料，請確認 Supabase 連線設定與排程是否已執行過</td></tr>';
+    return;
+  }
+  body.innerHTML = '';
+  riskData.forEach(r=>{
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="num">${r.code}</td>
+      <td>${r.name}</td>
+      <td><span class="risk-level ${r.level}">${r.level==='high'?'高度風險':'警戒'}</span></td>
+      <td class="num" style="color:${r.level==='high'?'var(--red-strong)':'var(--amber)'};font-weight:700;">${r.score}</td>
+      <td>${r.risk}</td>
+      <td>${r.action}</td>
+      <td class="num">${r.close.toFixed(2)}</td>
+      <td>${fmtPct(r.chg)}</td>
+      <td class="num">${r.vol||'-'}</td>
+      <td class="num">${r.atr||'-'}</td>
+      <td class="num">${r.sell}</td>
+      <td class="num">${r.liq}</td>
+      <td style="white-space:normal;max-width:220px;">${r.note}</td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
+// 交易性風險（流動性）目前尚未在 fetch_and_score.py 中計算，
+// 若要啟用，需在 schema 補一張 liquidity_scores 表並在腳本中加入估算邏輯
+// （estimate = 100張約當金額 / 20日均量金額），此處先留空清單。
+let liquidityData = [];
+
+function renderLiquidity(){
+  const body = document.getElementById('liquidity-body');
+  if (liquidityData.length === 0) {
+    body.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--sub);padding:20px;">此區塊尚未串接（見程式註解說明）</td></tr>';
+    return;
+  }
+  body.innerHTML = '';
+  liquidityData.forEach(r=>{
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="num">${r.code}</td><td>${r.name}</td><td class="num">${r.close}</td>
+      <td class="num">${r.vol20}</td><td class="num">${r.value}</td><td class="num">${r.pct}</td>
+      <td><span class="score-cell" style="background:#7a5230;">${r.riskScore}</span></td><td>${r.liq}</td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
+// ---------- Page 4: Global ----------
+// 資料來源：Supabase global_factors 表（此表目前 fetch_and_score.py 尚未寫入，
+// 需要你另外接國際指數/匯率資料源，例如 Yahoo Finance 非官方 API 或付費資料商）
+let factorData = [];
+
+async function loadFactorData() {
+  const raw = await sb('global_factors', 'order=trade_date.desc&limit=50');
+  factorData = raw.map(r => ({
+    cat: r.category, factor: r.factor_name, code: r.factor_code, val: r.value,
+    chg: r.chg_pct, dir: r.direction, impact: r.impact_score ?? '-', time: '', note: r.note || '',
+  }));
+}
+
+function renderFactors(){
+  const body = document.getElementById('factor-body');
+  if (factorData.length === 0) {
+    body.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--sub);padding:20px;">此區塊尚未串接國際資料源（見程式註解說明）</td></tr>';
+    return;
+  }
+  body.innerHTML = '';
+  factorData.forEach(r=>{
+    const dirColor = r.dir==='偏多' ? 'var(--up)' : (r.dir==='偏空' ? 'var(--down)' : 'var(--sub)');
+    const impactCell = r.impact==='-' ? '-' : `<span style="background:${r.impact.startsWith('+')?'#f6d9d5':'#d5efe0'};padding:2px 8px;border-radius:5px;font-weight:700;">${r.impact}</span>`;
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${r.cat}</td><td>${r.factor}</td><td class="num">${r.code}</td>
+      <td class="num">${r.val}</td><td class="num">${r.chg}</td>
+      <td style="color:${dirColor};font-weight:700;">${r.dir}</td>
+      <td>${impactCell}</td><td class="num">${r.time}</td>
+      <td style="white-space:normal;max-width:260px;">${r.note}</td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
+// 主要股市對照 / 原物料對照：同樣需要接國際 ETF 報價來源，此處先留空清單，
+// 待你決定要用哪個資料源（Yahoo Finance 非官方 API 或付費商）後補上 loadMarketData()
+let marketData = [];
+function renderMarket(){
+  const body = document.getElementById('market-body');
+  if (marketData.length === 0) {
+    body.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--sub);padding:20px;">此區塊尚未串接（見程式註解說明）</td></tr>';
+    return;
+  }
+  body.innerHTML = '';
+  marketData.forEach(r=>{
+    const corrColor = r.corr>=0.7?'#f6d9d5':(r.corr>=0.5?'#fdeeda':'#eef0f3');
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${r.asset}</td><td class="num">${r.code}</td><td>${r.name}</td>
+      <td class="num">${r.close.toFixed(2)}</td><td>${fmtPct(r.day)}</td>
+      <td>${fmtPct(r.d5)}</td><td>${fmtPct(r.d20)}</td><td>${fmtPct(r.d60)}</td>
+      <td><span style="background:${corrColor};padding:2px 8px;border-radius:5px;font-weight:700;">+${r.corr.toFixed(2)}</span></td>
+      <td>${r.note}</td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
+let commodityData = [];
+function renderCommodity(){
+  const body = document.getElementById('commodity-body');
+  if (commodityData.length === 0) {
+    body.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--sub);padding:20px;">此區塊尚未串接（見程式註解說明）</td></tr>';
+    return;
+  }
+  body.innerHTML = '';
+  commodityData.forEach(r=>{
+    const corrColor = r.corr>=0 ? '#f6d9d5' : '#d5efe0';
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${r.asset}</td><td class="num">${r.code}</td><td>${r.name}</td>
+      <td class="num">${r.close.toFixed(2)}</td><td>${fmtPct(r.day)}</td>
+      <td>${fmtPct(r.d5)}</td><td>${fmtPct(r.d20)}</td><td>${fmtPct(r.d60)}</td>
+      <td><span style="background:${corrColor};padding:2px 8px;border-radius:5px;font-weight:700;">${r.corr>=0?'+':''}${r.corr.toFixed(2)}</span></td>
+      <td>${r.note}</td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
+async function loadStatus() {
+  const raw = await sb('fetch_status', 'id=eq.1&limit=1');
+  if (raw && raw[0]) {
+    const s = raw[0];
+    document.getElementById('sync-date').textContent = s.last_sync_at ? s.last_sync_at.slice(0,10) : '-';
+  }
+}
+
+async function refreshData(){
+  await Promise.all([
+    loadStatus(),
+    loadSignalData(),
+    loadExplosionData(),
+    loadRiskData(),
+  ]);
+  renderSignal();
+  renderExplosion();
+  renderRisk();
+  renderLiquidity();
+  renderFactors();
+  renderMarket();
+  renderCommodity();
+}
+
+// 頁面載入時先跑一次
+refreshData();
+</script>
+</body>
+</html>
