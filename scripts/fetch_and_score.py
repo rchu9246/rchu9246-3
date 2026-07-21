@@ -185,7 +185,11 @@ def fetch_institutional_t86():
     date_str = TODAY.replace("-", "")
     url = f"https://www.twse.com.tw/fund/T86?response=json&date={date_str}&selectType=ALLBUT0999"
     try:
-        data = http_get_json(url, timeout=150, retries=1, referer="https://www.twse.com.tw/zh/page/trading/fund/T86.html")
+        # 已測試確認：這個舊版端點對 GitHub Actions 的請求環境穩定連不上/被降速，
+        # 即使拉長到 150 秒仍會逾時。不再重試、逾時設短一點，讓它快速失敗，
+        # 避免每天排程都白白浪費好幾分鐘在一個確定會失敗的請求上。
+        # 之後若要真的拿到法人買賣超資料，建議改用付費資料商（TEJ/CMoney等）的正式 API。
+        data = http_get_json(url, timeout=20, retries=0, referer="https://www.twse.com.tw/zh/page/trading/fund/T86.html")
     except Exception as e:
         print(f"[WARN] 三大法人資料抓取失敗：{e}，本次僅用價量資料計算")
         return {}
