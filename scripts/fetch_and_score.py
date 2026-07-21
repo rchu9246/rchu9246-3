@@ -238,6 +238,117 @@ def fetch_institutional_t86():
     return out
 
 
+def fetch_taiex_index():
+    """發行量加權股價指數（TAIEX）當日收盤
+    端點：/exchangeReport/MI_INDEX（大盤統計資訊）
+    """
+    try:
+        data = http_get_json(f"{TWSE_BASE}/exchangeReport/MI_INDEX")
+    except Exception as e:
+        print(f"[WARN] TAIEX 大盤指數抓取失敗：{e}")
+        return None
+    for row in data:
+        name = row.get("指數") or row.get("Index")
+        if name and "發行量加權股價指數" in name:
+            return safe_float(row.get("收盤指數") or row.get("ClosingIndex"))
+    return None
+
+
+def fetch_yahoo_quote(symbol):
+    """透過 Yahoo Finance 非官方 chart API 抓國際指數/匯率報價（例如 ^SOX、TWD=X）
+    這是業界廣泛使用的非官方端點，比證交所的舊版報表穩定，但仍非正式合約 API，
+    未來如果失效，建議改用付費資料商。
+    """
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=5d&interval=1d"
+    try:
+        data = http_get_json(url, timeout=20, retries=1)
+    except Exception as e:
+        print(f"[WARN] Yahoo Finance 抓取 {symbol} 失敗：{e}")
+        return None
+    try:
+        result = data["chart"]["result"][0]
+        meta = result["meta"]
+        close = meta.get("regularMarketPrice")
+        prev_close = meta.get("chartPreviousClose") or meta.get("previousClose")
+        if close is None or prev_close in (None, 0):
+            return None
+        chg_pct = (close - prev_close) / prev_close * 100
+        return {"close": close, "chg_pct": round(chg_pct, 2)}
+    except (KeyError, IndexError, TypeError) as e:
+        print(f"[WARN] Yahoo Finance 回傳格式異常（{symbol}）：{e}")
+        return None
+
+
+# 全球資產對照要用到的台股 ETF 代號對照表（這些 ETF 本身就在 STOCK_DAY_ALL 裡，不用額外接資料源）
+GLOBAL_ETF_MAP = {
+    "00646": {"category": "美股ETF", "name": "元大S&P500", "note": "美國大型股"},
+    "00662": {"category": "美股ETF", "name": "富邦NASDAQ", "note": "美國科技股"},
+    "00668": {"category": "美股ETF", "name": "國泰美國道瓊", "note": "美國藍籌"},
+    "00635U": {"category": "原物料", "name": "期元大S&P黃金", "note": "避險資產"},
+    "00642U": {"category": "原物料", "name": "期元大S&P石油", "note": "通膨指標"},
+    "00682U": {"category": "原物料", "name": "期元大美元指數", "note": "外資流向"},
+}
+
+
+def pct_change_n_days_ago(history_for_code, n):
+    """算「N個交易日前」到今天的漲跌幅%，資料不足時回傳 None（不瞎猜）"""
+    if len(history_for_code) < n + 1:
+        return None
+    closes = [c for _, c in history_for_code]
+    old_close = closes[-(n + 1)]
+    new_close = closes[-1]
+    if old_close == 0:
+        return None
+    return round((new_close - old_close) / old_close * 100, 2)
+
+
+def compute_global_factors(stock_day, price_history):
+    rows = []
+
+    # 1. TAIEX 大盤指數
+    taiex_close = fetch_taiex_index()
+    if taiex_close is not None:
+        rows.append({
+            "factor_code": "TAIEX", "trade_date": TODAY, "category": "大盤",
+            "factor_name": "台股加權指數", "value": taiex_close, "chg_pct": None,
+            "direction": "中性", "impact_score": None, "note": "台灣證券交易所發行量加權股價指數",
+        })
+
+    # 2. 國際指數/匯率（Yahoo Finance）
+    yahoo_targets = [
+        ("^SOX", "半導體", "費半 SOX", "台股電子/半導體最重要隔夜因子之一"),
+        ("TWD=X", "匯率", "美元/台幣", "台幣貶值常代表外資壓力"),
+    ]
+    for symbol, category, name, note in yahoo_targets:
+        q = fetch_yahoo_quote(symbol)
+        if q:
+            direction = "偏多" if q["chg_pct"] > 0 else ("偏空" if q["chg_pct"] < 0 else "中性")
+            rows.append({
+                "factor_code": symbol, "trade_date": TODAY, "category": category,
+                "factor_name": name, "value": q["close"], "chg_pct": q["chg_pct"],
+                "direction": direction, "impact_score": None, "note": note,
+            })
+
+    # 3. 台股掛牌的美股/原物料 ETF（資料已經在 stock_day 裡，只是重新整理格式）
+    for code, meta in GLOBAL_ETF_MAP.items():
+        sd = stock_day.get(code)
+        if not sd:
+            continue
+        chg_pct = (sd["change"] / (sd["close"] - sd["change"]) * 100) if (sd["close"] - sd["change"]) else 0
+        hist = price_history.get(code, [])
+        d5 = pct_change_n_days_ago(hist, 5)
+        d20 = pct_change_n_days_ago(hist, 20)
+        d60 = pct_change_n_days_ago(hist, 60)
+        rows.append({
+            "factor_code": f"ETF_{code}", "trade_date": TODAY, "category": meta["category"],
+            "factor_name": meta["name"], "value": sd["close"], "chg_pct": round(chg_pct, 2),
+            "direction": None, "impact_score": None,
+            "note": json.dumps({"code": code, "d5": d5, "d20": d20, "d60": d60, "note": meta["note"]}, ensure_ascii=False),
+        })
+
+    return rows
+
+
 def fetch_pe_pb():
     """個股本益比、殖利率、股價淨值比（可用於篩選基本面體質）
     端點：/exchangeReport/BWIBBU_ALL
@@ -591,11 +702,16 @@ def main():
             "dealer_net": inst.get("dealer_net"), "institutional_net": inst.get("institutional_net"),
         })
 
+    print("計算全球資產對照（TAIEX + 國際指數/匯率 + 台股ETF）...")
+    global_rows = compute_global_factors(stock_day, price_history)
+    print(f"  產出 {len(global_rows)} 筆")
+
     print("寫入 Supabase...")
     supabase_upsert("stock_daily", daily_rows, "code,trade_date")
     supabase_upsert("signal_scores", signal_rows, "code,trade_date")
     supabase_upsert("explosion_scores", explosion_rows, "code,trade_date")
     supabase_upsert("risk_scores", risk_rows, "code,trade_date")
+    supabase_upsert("global_factors", global_rows, "factor_code,trade_date")
 
     status_row = [{
         "id": 1,
