@@ -172,7 +172,7 @@ def fetch_institutional_t86():
     date_str = TODAY.replace("-", "")
     url = f"https://www.twse.com.tw/fund/T86?response=json&date={date_str}&selectType=ALLBUT0999"
     try:
-        data = http_get_json(url, referer="https://www.twse.com.tw/zh/page/trading/fund/T86.html")
+        data = http_get_json(url, timeout=90, referer="https://www.twse.com.tw/zh/page/trading/fund/T86.html")
     except Exception as e:
         print(f"[WARN] 三大法人資料抓取失敗：{e}，本次僅用價量資料計算")
         return {}
