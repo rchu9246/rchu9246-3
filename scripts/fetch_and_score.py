@@ -35,8 +35,11 @@ TWSE_BASE = "https://openapi.twse.com.tw/v1"
 # 基礎工具：HTTP GET / Supabase upsert
 # --------------------------------------------------------------------------
 
-def http_get_json(url, timeout=30):
-    req = urllib.request.Request(url, headers={"User-Agent": "signal-dashboard/1.0"})
+def http_get_json(url, timeout=30, referer=None):
+    headers = {"User-Agent": "Mozilla/5.0 (signal-dashboard/1.0)"}
+    if referer:
+        headers["Referer"] = referer
+    req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
@@ -160,23 +163,55 @@ def fetch_stock_day_all():
 
 def fetch_institutional_t86():
     """三大法人買賣超日報（外資/投信/自營商）
-    端點：/fund/T86
-    注意：欄位名稱以官方 swagger 為準，這裡用常見欄位名稱嘗試對應，
-    若 TWSE 調整欄位，需要打開 swagger.json 核對。
+    端點：這份報表不在 openapi.twse.com.tw（新版 REST API）裡，
+    是證交所另一套舊版網頁 API（www.twse.com.tw/fund/T86），
+    回傳格式是 {"fields": [...欄位名...], "data": [[...每列資料...], ...]}，
+    不是一般的物件陣列，所以要用欄位名稱去對應每一欄的位置（index），
+    這樣即使 TWSE 之後調整欄位順序，只要欄位名稱關鍵字沒變就還抓得到。
     """
+    date_str = TODAY.replace("-", "")
+    url = f"https://www.twse.com.tw/fund/T86?response=json&date={date_str}&selectType=ALLBUT0999"
     try:
-        data = http_get_json(f"{TWSE_BASE}/fund/T86")
+        data = http_get_json(url, referer="https://www.twse.com.tw/zh/page/trading/fund/T86.html")
     except Exception as e:
         print(f"[WARN] 三大法人資料抓取失敗：{e}，本次僅用價量資料計算")
         return {}
+
+    if not isinstance(data, dict) or data.get("stat") != "OK":
+        stat = data.get("stat") if isinstance(data, dict) else "未知格式"
+        print(f"[WARN] 三大法人資料狀態異常（{stat}），可能是非交易日或當日資料尚未公布，本次僅用價量資料計算")
+        return {}
+
+    fields = data.get("fields", [])
+    rows = data.get("data", [])
+
+    def find_col(keyword, exclude=None):
+        for i, f in enumerate(fields):
+            if keyword in f and (not exclude or exclude not in f):
+                return i
+        return None
+
+    idx_code = find_col("證券代號")
+    idx_foreign = find_col("外陸資買賣超股數", exclude="自營商")
+    idx_trust = find_col("投信買賣超股數")
+    idx_dealer = None
+    for i, f in enumerate(fields):
+        if f.strip() == "自營商買賣超股數":
+            idx_dealer = i
+            break
+
+    if idx_code is None:
+        print(f"[WARN] 三大法人資料欄位對不上（找不到「證券代號」欄），目前欄位：{fields}")
+        return {}
+
     out = {}
-    for row in data:
-        code = row.get("Code") or row.get("證券代號")
+    for row in rows:
+        code = str(row[idx_code]).strip()
         if not code:
             continue
-        foreign_net = safe_float(row.get("ForeignInvestorsExcludeDealerNetBuySell") or row.get("外資及陸資買賣超股數"))
-        trust_net = safe_float(row.get("InvestmentTrustNetBuySell") or row.get("投信買賣超股數"))
-        dealer_net = safe_float(row.get("DealerNetBuySell") or row.get("自營商買賣超股數"))
+        foreign_net = safe_float(row[idx_foreign]) if idx_foreign is not None else 0
+        trust_net = safe_float(row[idx_trust]) if idx_trust is not None else 0
+        dealer_net = safe_float(row[idx_dealer]) if idx_dealer is not None else 0
         out[code] = {
             "foreign_net": foreign_net,
             "trust_net": trust_net,
