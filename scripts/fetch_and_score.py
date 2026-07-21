@@ -22,6 +22,7 @@ import sys
 import json
 import math
 import statistics
+import time
 from datetime import date, datetime, timezone
 import urllib.request
 import urllib.error
@@ -35,13 +36,25 @@ TWSE_BASE = "https://openapi.twse.com.tw/v1"
 # 基礎工具：HTTP GET / Supabase upsert
 # --------------------------------------------------------------------------
 
-def http_get_json(url, timeout=30, referer=None):
+def http_get_json(url, timeout=30, referer=None, retries=2, retry_wait=3):
+    """帶重試機制的 HTTP GET，證交所伺服器偶爾會抖動（回傳空內容或逾時），
+    失敗時等幾秒重試，避免單次抖動就讓整個排程失敗。
+    """
     headers = {"User-Agent": "Mozilla/5.0 (signal-dashboard/1.0)"}
     if referer:
         headers["Referer"] = referer
-    req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                print(f"[WARN] 請求失敗（第 {attempt + 1} 次）：{e}，{retry_wait} 秒後重試...")
+                time.sleep(retry_wait)
+    raise last_err
 
 
 def supabase_upsert(table, rows, on_conflict):
@@ -172,7 +185,7 @@ def fetch_institutional_t86():
     date_str = TODAY.replace("-", "")
     url = f"https://www.twse.com.tw/fund/T86?response=json&date={date_str}&selectType=ALLBUT0999"
     try:
-        data = http_get_json(url, timeout=90, referer="https://www.twse.com.tw/zh/page/trading/fund/T86.html")
+        data = http_get_json(url, timeout=150, retries=1, referer="https://www.twse.com.tw/zh/page/trading/fund/T86.html")
     except Exception as e:
         print(f"[WARN] 三大法人資料抓取失敗：{e}，本次僅用價量資料計算")
         return {}
@@ -521,7 +534,12 @@ def main():
     print(f"=== 開始執行 {TODAY} 收盤後計算 ===")
 
     print("抓取個股日成交資訊 (STOCK_DAY_ALL)...")
-    stock_day = fetch_stock_day_all()
+    try:
+        stock_day = fetch_stock_day_all()
+    except Exception as e:
+        print(f"[FATAL] STOCK_DAY_ALL 抓取失敗（已重試但仍失敗）：{e}")
+        print("這通常是證交所伺服器暫時性問題，晚點手動重跑一次通常就會恢復正常")
+        sys.exit(1)
     print(f"  取得 {len(stock_day)} 檔")
 
     print("抓取三大法人買賣超 (T86)...")
