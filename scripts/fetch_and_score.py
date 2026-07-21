@@ -64,6 +64,64 @@ def supabase_upsert(table, rows, on_conflict):
         print(f"[ERROR] 寫入 {table} 失敗：{e.code} {e.read().decode('utf-8')[:500]}")
 
 
+def supabase_select(table, query, timeout=60):
+    """用 Supabase REST API 讀資料（給計算主升段要抓歷史股價用）"""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return []
+    url = f"{SUPABASE_URL}/rest/v1/{table}?{query}"
+    req = urllib.request.Request(url, headers={
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        print(f"[WARN] 讀取 {table} 失敗：{e}")
+        return []
+
+
+def fetch_monthly_revenue():
+    """個股月營收（含去年同月增減%）
+    端點：/opendata/t187ap05_L
+    公司依規定每月10日前公布上月營收，所以這份資料月初幾天可能還是上上個月的
+    """
+    try:
+        data = http_get_json(f"{TWSE_BASE}/opendata/t187ap05_L")
+    except Exception as e:
+        print(f"[WARN] 月營收資料抓取失敗：{e}")
+        return {}
+    out = {}
+    for row in data:
+        code = row.get("公司代號")
+        if not code:
+            continue
+        yoy = safe_float(row.get("營業收入-去年同月增減(%)"))
+        out[code] = {"revenue_yoy_pct": yoy}
+    return out
+
+
+def fetch_price_history(codes, days=60):
+    """從 Supabase 撈每檔股票近期收盤價歷史，用來算均線趨勢（主升段判斷用）
+    只在資料庫已經累積足夠天數時才有意義，天數不夠時回傳的歷史會很短，
+    compute 那邊會自動跳過判斷。
+    """
+    rows = supabase_select(
+        "stock_daily",
+        f"select=code,trade_date,close&order=trade_date.desc&limit=50000",
+    )
+    history = {}
+    for r in rows:
+        code = r.get("code")
+        if code not in history:
+            history[code] = []
+        history[code].append((r.get("trade_date"), safe_float(r.get("close"))))
+    # 依日期由舊到新排序
+    for code in history:
+        history[code].sort(key=lambda x: x[0])
+    return history
+
+
 def safe_float(v, default=0.0):
     try:
         if v in (None, "", "--", "N/A"):
@@ -155,14 +213,18 @@ def fetch_pe_pb():
 # --------------------------------------------------------------------------
 # 這是一套「簡化版」規則，目的是先讓系統可以動起來、之後你可以依實際回測結果調整權重。
 #
-# 【訊號分數 net_signal】
+# 【訊號分數 net_signal】（v2：新增財務底色 / 營收動能 / 主升段 三個維度）
 #   +1  法人（三大合計）買超股數 > 0
 #   +1  法人買超股數 > 該股 20 日均量的 5%（買超強度夠大）
 #   +1  今日漲跌 > 0 且成交量 > 昨日（價量齊揚，此簡化版用「今日量>0」近似）
+#   +1  財務底色佳：本益比介於 0~25（有獲利、不過度昂貴）且殖利率 > 1.5% 且股價淨值比 0~4
+#   +1  營收動能加速：最新月營收年增率 > 20%
+#   +1  主升段確認：站上上揚的20日均線、且20MA在60MA之上（需資料庫累積 ≥20 個交易日才會判斷，不足時不加分也不扣分）
 #   -1  法人賣超股數 > 0
 #   -1  法人賣超股數 > 該股 20 日均量的 5%
 #   -1  今日跌幅 > 5%（單日重挫）
-#   最終 recommendation 依 net_signal 對照：
+#   最終 recommendation 依 net_signal 對照（門檻值沒變，但因為新增了三個正向維度，
+#   理論上 strong-bull 的檔數會比 v1 版本多一些，這是預期中的行為，門檻值可依實際回測再調）：
 #     net_signal >= 3      → strong-bull 🚀 強多候選
 #     net_signal == 2      → bull ↗ 多頭候選
 #     net_signal == 1      → watch 🟢 留意
@@ -193,6 +255,38 @@ def fetch_pe_pb():
 # 這些門檻值都寫在下面常數區，方便你之後調整。
 # --------------------------------------------------------------------------
 
+def compute_ma_trend(history_for_code, min_days=20):
+    """判斷是否符合「主升段確認」：站上20日均線、20日均線向上、且20MA在60MA之上
+    history_for_code: [(date_str, close), ...] 由舊到新排序
+    資料不足 min_days 天時回傳 False（不判斷，避免用不足的資料誤判）
+    """
+    if len(history_for_code) < min_days:
+        return False
+    closes = [c for _, c in history_for_code]
+    ma20_today = sum(closes[-20:]) / 20
+    price_today = closes[-1]
+    above_ma20 = price_today > ma20_today
+    ma20_rising = True
+    if len(closes) >= 21:
+        ma20_yesterday = sum(closes[-21:-1]) / 20
+        ma20_rising = ma20_today > ma20_yesterday
+    above_ma60 = True
+    if len(closes) >= 60:
+        ma60_today = sum(closes[-60:]) / 60
+        above_ma60 = ma20_today > ma60_today
+    return above_ma20 and ma20_rising and above_ma60
+
+
+def financial_color_ok(pe_pb_row):
+    """判斷「財務底色佳」：本益比合理（有獲利且不過度昂貴）、有配息、股價淨值比不過高"""
+    if not pe_pb_row:
+        return False
+    pe = pe_pb_row.get("pe", 0)
+    yield_pct = pe_pb_row.get("yield", 0)
+    pb = pe_pb_row.get("pb", 0)
+    return (0 < pe <= 25) and (yield_pct > 1.5) and (0 < pb <= 4)
+
+
 SIGNAL_NET_TO_REC = [
     (3, "strong-bull", "🚀 強多候選"),
     (2, "bull", "↗ 多頭候選"),
@@ -216,7 +310,7 @@ def recommendation_for(net_signal):
     return "avoid", "🚫 避開"
 
 
-def compute_signal_scores(stock_day, institutional):
+def compute_signal_scores(stock_day, institutional, pe_pb, revenue, price_history):
     rows = []
     for code, sd in stock_day.items():
         inst = institutional.get(code, {})
@@ -234,7 +328,6 @@ def compute_signal_scores(stock_day, institutional):
             net_signal -= 1
             bear_tags.append("法人賣超")
 
-        # 用成交量的粗略基準（沒有 20 日均量歷史時，用今日量的 5% 概略近似，正式上線建議累積歷史後改真 20 日均量）
         vol_base = max(sd["volume"], 1)
         if inst_net > 0 and abs(inst_net) > vol_base * 0.05:
             net_signal += 1
@@ -249,6 +342,23 @@ def compute_signal_scores(stock_day, institutional):
         if chg_pct <= RISK_DROP_LIMIT_PCT:
             net_signal -= 1
             bear_tags.append("單日重挫")
+
+        # 財務底色佳：本益比合理、有配息、股價淨值比不過高
+        if financial_color_ok(pe_pb.get(code)):
+            net_signal += 1
+            bull_tags.append("財務底色佳")
+
+        # 營收動能加速：最新月營收年增率 > 20%
+        rev = revenue.get(code)
+        if rev and rev.get("revenue_yoy_pct", 0) > 20:
+            net_signal += 1
+            bull_tags.append(f"營收動能加速（年增{rev['revenue_yoy_pct']:.1f}%）")
+
+        # 主升段確認：站上上揚的20日均線，且20MA在60MA之上（需要至少20天歷史資料）
+        hist = price_history.get(code, [])
+        if compute_ma_trend(hist):
+            net_signal += 1
+            bull_tags.append("主升段確認")
 
         rec, label = recommendation_for(net_signal)
         composite_score = round(net_signal * 2.5 + (chg_pct * 0.3), 2)
@@ -383,12 +493,25 @@ def main():
     institutional = fetch_institutional_t86()
     print(f"  取得 {len(institutional)} 檔")
 
+    print("抓取本益比/殖利率/淨值比 (BWIBBU_ALL)...")
+    pe_pb = fetch_pe_pb()
+    print(f"  取得 {len(pe_pb)} 檔")
+
+    print("抓取月營收 (t187ap05_L)...")
+    revenue = fetch_monthly_revenue()
+    print(f"  取得 {len(revenue)} 檔")
+
+    print("讀取歷史股價（算主升段用）...")
+    price_history = fetch_price_history(stock_day.keys() if stock_day else [])
+    days_available = max((len(v) for v in price_history.values()), default=0)
+    print(f"  目前資料庫累積約 {days_available} 個交易日歷史（需要 ≥20 天才會開始判斷主升段）")
+
     if not stock_day:
         print("[FATAL] 未取得任何個股資料，中止本次執行（可能是非交易日或端點異動）")
         sys.exit(1)
 
     print("計算訊號分數...")
-    signal_rows = compute_signal_scores(stock_day, institutional)
+    signal_rows = compute_signal_scores(stock_day, institutional, pe_pb, revenue, price_history)
     print(f"  產出 {len(signal_rows)} 筆")
 
     print("計算爆發前兆分數...")
