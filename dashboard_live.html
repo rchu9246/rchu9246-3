@@ -451,8 +451,8 @@
 // 在 Supabase 專案：Settings → API 可以找到這兩個值
 // 注意：這裡只能填 anon public key（唯讀），千萬不要把 service_role key 放進前端！
 // =====================================================
-const SUPABASE_URL = 'https://fdctiiirsqbetwylcrwm.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZkY3RpaWlyc3FiZXR3eWxjcndtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ1MzU3MTYsImV4cCI6MjEwMDExMTcxNn0.tUddUte75zfFfj-mKRVL_hxFdVcx4kGVeQ1mHMkW_A0';
+const SUPABASE_URL = 'https://YOUR-PROJECT.supabase.co';
+const SUPABASE_ANON_KEY = 'YOUR-ANON-PUBLIC-KEY';
 
 async function sb(table, query = '') {
   const url = `${SUPABASE_URL}/rest/v1/${table}?${query}`;
@@ -709,7 +709,17 @@ async function loadGlobalData() {
   marketData = [];
   commodityData = [];
 
-  raw.forEach(r => {
+  // 資料庫會累積好幾天的歷史，同一個 factor_code 可能出現好幾筆（每天一筆）。
+  // 因為 order=trade_date.desc，同一個 factor_code 第一次出現的那筆就是最新的，
+  // 用 seenCodes 擋掉之後重複出現的舊資料。
+  const seenCodes = new Set();
+  const latestRows = raw.filter(r => {
+    if (seenCodes.has(r.factor_code)) return false;
+    seenCodes.add(r.factor_code);
+    return true;
+  });
+
+  latestRows.forEach(r => {
     if (r.factor_code === 'TAIEX') {
       taiexData = { close: r.value };
       return;
@@ -734,7 +744,7 @@ async function loadGlobalData() {
   });
 
   document.getElementById('global-status-badge').textContent =
-    raw.length === 0 ? '尚無資料' : `已載入 ${raw.length} 筆`;
+    latestRows.length === 0 ? '尚無資料' : `已載入 ${latestRows.length} 筆（最新交易日）`;
 }
 
 function fmtPctOrDash(v) {
