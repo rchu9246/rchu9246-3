@@ -451,8 +451,8 @@
 // 在 Supabase 專案：Settings → API 可以找到這兩個值
 // 注意：這裡只能填 anon public key（唯讀），千萬不要把 service_role key 放進前端！
 // =====================================================
-const SUPABASE_URL = 'https://YOUR-PROJECT.supabase.co';
-const SUPABASE_ANON_KEY = 'YOUR-ANON-PUBLIC-KEY';
+const SUPABASE_URL = 'https://fdctiiirsqbetwylcrwm.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZkY3RpaWlyc3FiZXR3eWxjcndtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ1MzU3MTYsImV4cCI6MjEwMDExMTcxNn0.tUddUte75zfFfj-mKRVL_hxFdVcx4kGVeQ1mHMkW_A0';
 
 async function sb(table, query = '') {
   const url = `${SUPABASE_URL}/rest/v1/${table}?${query}`;
