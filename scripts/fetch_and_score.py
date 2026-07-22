@@ -542,6 +542,14 @@ def compute_signal_scores(stock_day, institutional, pe_pb, revenue, price_histor
             "bear_tags": bear_tags,
             "composite_score": composite_score,
         })
+
+    # 多頭候選排名編號：在所有「強多候選」等級的股票裡，依綜合分數高到低排名，
+    # #1 是分數最高的那檔，排名編號插在多頭訊號標籤的最前面（對照原截圖的「多頭候選 #5」樣式）
+    strong_bull_rows = [r for r in rows if r["recommendation"] == "strong-bull"]
+    strong_bull_rows.sort(key=lambda r: r["composite_score"], reverse=True)
+    for rank, r in enumerate(strong_bull_rows, start=1):
+        r["bull_tags"].insert(0, f"多頭候選 #{rank}")
+
     return rows
 
 
