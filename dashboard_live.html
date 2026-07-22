@@ -86,12 +86,6 @@
     border-bottom:1px solid var(--line);
     padding:0 8px;
   }
-    align-items:center;
-    gap:5px;
-  }
-  .tab:hover{color:var(--ink);}
-  .tab.active{color:var(--accent);border-bottom-color:var(--accent);font-weight:700;background:var(--accent-soft);}
-
   .tab{
     padding:10px 14px;
     font-size:12.5px;
@@ -100,6 +94,12 @@
     color:var(--sub);
     border-bottom:2px solid transparent;
     display:flex;
+    align-items:center;
+    gap:5px;
+  }
+  .tab:hover{color:var(--ink);}
+  .tab.active{color:var(--accent);border-bottom-color:var(--accent);font-weight:700;background:var(--accent-soft);}
+
   .page{display:none;padding:16px;}
   .page.active{display:block;}
 
@@ -452,7 +452,7 @@
 // 注意：這裡只能填 anon public key（唯讀），千萬不要把 service_role key 放進前端！
 // =====================================================
 const SUPABASE_URL = 'https://fdctiiirsqbetwylcrwm.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZkY3RpaWlyc3FiZXR3eWxjcndtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ1MzU3MTYsImV4cCI6MjEwMDExMTcxNn0.tUddUte75zfFfj-mKRVL_hxFdVcx4kGVeQ1mHMkW_A0';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZkY3RpaWlyc3FiZXR3eWxjcnRtIiwicm9sZSI6ImFub24iLCJpYXQiOjEzODQ1MzU3MTYsImV4cCI6MjA4MjExMTcxNn0.tUddUte75zFffj-mKRVL_hxFdVcx4kGVeQ1mHMkW_A0';
 
 async function sb(table, query = '') {
   const url = `${SUPABASE_URL}/rest/v1/${table}?${query}`;
