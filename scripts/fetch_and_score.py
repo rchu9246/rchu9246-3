@@ -189,7 +189,9 @@ def fetch_institutional_t86():
         # 即使拉長到 150 秒仍會逾時。不再重試、逾時設短一點，讓它快速失敗，
         # 避免每天排程都白白浪費好幾分鐘在一個確定會失敗的請求上。
         # 之後若要真的拿到法人買賣超資料，建議改用付費資料商（TEJ/CMoney等）的正式 API。
-        data = http_get_json(url, timeout=20, retries=0, referer="https://www.twse.com.tw/zh/page/trading/fund/T86.html")
+        # 這個端點時好時壞（伺服器有時候在合理時間內回應，有時候會逾時），
+        # 30秒 + 重試1次是在「多一次機會抓到真資料」跟「不要每天多花太多時間等一個不保證成功的請求」之間取平衡
+        data = http_get_json(url, timeout=30, retries=1, referer="https://www.twse.com.tw/zh/page/trading/fund/T86.html")
     except Exception as e:
         print(f"[WARN] 三大法人資料抓取失敗：{e}，本次僅用價量資料計算")
         return {}
