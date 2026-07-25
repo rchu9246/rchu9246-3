@@ -80,21 +80,37 @@ def supabase_upsert(table, rows, on_conflict):
         print(f"[ERROR] 寫入 {table} 失敗：{e.code} {e.read().decode('utf-8')[:500]}")
 
 
-def supabase_select(table, query, timeout=60):
-    """用 Supabase REST API 讀資料（給計算主升段要抓歷史股價用）"""
+def supabase_select(table, query, timeout=60, page_size=1000, max_pages=100):
+    """用 Supabase REST API 讀資料（給計算主升段/流動性要抓歷史資料用）。
+
+    ⚠️ 重要：Supabase/PostgREST 預設單次請求最多只回傳 1000 筆，就算網址參數
+    寫 limit=50000 也一樣會被伺服器砍到 1000 筆——URL 裡的 limit 只是「上限」，
+    不會突破伺服器自己的分頁限制。要真的拿到全部資料，必須用 Range header
+    分頁抓取，抓到某一頁回傳筆數小於 page_size，代表已經到底了。
+    """
     if not SUPABASE_URL or not SUPABASE_KEY:
         return []
     url = f"{SUPABASE_URL}/rest/v1/{table}?{query}"
-    req = urllib.request.Request(url, headers={
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except Exception as e:
-        print(f"[WARN] 讀取 {table} 失敗：{e}")
-        return []
+    all_rows = []
+    for page in range(max_pages):
+        start = page * page_size
+        end = start + page_size - 1
+        req = urllib.request.Request(url, headers={
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Range-Unit": "items",
+            "Range": f"{start}-{end}",
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                chunk = json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            print(f"[WARN] 讀取 {table} 第 {page+1} 頁失敗：{e}")
+            break
+        all_rows.extend(chunk)
+        if len(chunk) < page_size:
+            break  # 這頁沒填滿，代表已經是最後一頁
+    return all_rows
 
 
 def fetch_monthly_revenue():
@@ -124,7 +140,7 @@ def fetch_price_history(codes, days=60):
     """
     rows = supabase_select(
         "stock_daily",
-        f"select=code,trade_date,close&order=trade_date.desc&limit=50000",
+        "select=code,trade_date,close&order=trade_date.desc",
     )
     history = {}
     for r in rows:
@@ -358,7 +374,7 @@ def fetch_volume_history():
     """
     rows = supabase_select(
         "stock_daily",
-        "select=code,trade_date,volume&order=trade_date.desc&limit=50000",
+        "select=code,trade_date,volume&order=trade_date.desc",
     )
     history = {}
     for r in rows:
