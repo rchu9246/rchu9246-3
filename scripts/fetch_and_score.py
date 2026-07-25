@@ -351,6 +351,81 @@ def compute_global_factors(stock_day, price_history):
     return rows
 
 
+def fetch_volume_history():
+    """從 Supabase 撈每檔股票近期成交量歷史，用來算 20 日均量（交易性風險/流動性判斷用）。
+    跟 fetch_price_history 分開寫成獨立函式，避免共用同一份資料結構時
+    不小心把「收盤價」跟「成交量」的 tuple 順序搞混。
+    """
+    rows = supabase_select(
+        "stock_daily",
+        "select=code,trade_date,volume&order=trade_date.desc&limit=50000",
+    )
+    history = {}
+    for r in rows:
+        code = r.get("code")
+        if code not in history:
+            history[code] = []
+        history[code].append((r.get("trade_date"), safe_float(r.get("volume"))))
+    for code in history:
+        history[code].sort(key=lambda x: x[0])
+    return history
+
+
+def compute_liquidity_scores(stock_day, volume_history, min_days=3, risk_threshold_pct=50.0):
+    """交易性風險 / 流動性：算「100張（10萬股）這筆單量，佔該股平均每日成交量的百分比」，
+    比例越高代表流動性越差（一筆不大的單就可能吃掉一整天的量，賣的時候容易砸自己的價）。
+
+    只列出比例達 risk_threshold_pct（預設50%）以上的股票，避免整份清單塞滿流動性正常的股票，
+    跟原本畫面上「交易性風險」是個篩選過的觀察名單的設計精神一致。
+    資料不足 min_days 天時整檔跳過，不用太少天數的平均值誤導判斷。
+    """
+    rows = []
+    for code, sd in stock_day.items():
+        close = sd["close"]
+        if close <= 0:
+            continue
+        hist = volume_history.get(code, [])
+        if len(hist) < min_days:
+            continue
+        recent = hist[-20:]  # 有多少天算多少天，最多取20天
+        volumes = [v for _, v in recent if v > 0]
+        if not volumes:
+            continue
+        avg_volume = sum(volumes) / len(volumes)
+        if avg_volume <= 0:
+            continue
+
+        est_trade_value_million = round(avg_volume * close / 1_000_000, 2)
+        pct_100lots = round((100_000 / avg_volume) * 100, 1)
+
+        if pct_100lots < risk_threshold_pct:
+            continue
+
+        risk_score = min(round(pct_100lots, 1), 100)
+        if risk_score >= 80:
+            label = "極低"
+        elif risk_score >= 60:
+            label = "低"
+        else:
+            label = "中"
+
+        rows.append({
+            "code": code,
+            "name": sd["name"],
+            "trade_date": TODAY,
+            "close": close,
+            "avg_volume_20d": int(avg_volume),
+            "avg_volume_days": len(volumes),
+            "est_trade_value_million": est_trade_value_million,
+            "pct_100lots_of_avg": pct_100lots,
+            "liquidity_risk_score": risk_score,
+            "liquidity_label": label,
+        })
+
+    rows.sort(key=lambda r: r["liquidity_risk_score"], reverse=True)
+    return rows[:300]  # 避免清單過長，只留風險最高的前 300 檔
+
+
 def fetch_pe_pb():
     """個股本益比、殖利率、股價淨值比（可用於篩選基本面體質）
     端點：/exchangeReport/BWIBBU_ALL
@@ -684,6 +759,9 @@ def main():
     days_available = max((len(v) for v in price_history.values()), default=0)
     print(f"  目前資料庫累積約 {days_available} 個交易日歷史（需要 ≥20 天才會開始判斷主升段）")
 
+    print("讀取歷史成交量（算交易性風險/流動性用）...")
+    volume_history = fetch_volume_history()
+
     if not stock_day:
         print("[FATAL] 未取得任何個股資料，中止本次執行（可能是非交易日或端點異動）")
         sys.exit(1)
@@ -699,6 +777,10 @@ def main():
     print("計算風險分數...")
     risk_rows = compute_risk_scores(stock_day, institutional)
     print(f"  產出 {len(risk_rows)} 筆（分數達門檻者）")
+
+    print("計算交易性風險/流動性...")
+    liquidity_rows = compute_liquidity_scores(stock_day, volume_history)
+    print(f"  產出 {len(liquidity_rows)} 筆（比例達門檻者）")
 
     # 個股每日快照（給歷史查詢用，可選）
     daily_rows = []
@@ -722,6 +804,7 @@ def main():
     supabase_upsert("explosion_scores", explosion_rows, "code,trade_date")
     supabase_upsert("risk_scores", risk_rows, "code,trade_date")
     supabase_upsert("global_factors", global_rows, "factor_code,trade_date")
+    supabase_upsert("liquidity_scores", liquidity_rows, "code,trade_date")
 
     status_row = [{
         "id": 1,
