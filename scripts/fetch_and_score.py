@@ -597,14 +597,23 @@ def compute_boll_position_pct(current_close, history_for_code, period=20, k=2, m
     return round((current_close - lower) / (upper - lower) * 100, 2)
 
 
-def compute_ma_trend(history_for_code, min_days=20):
+def compute_ma_trend(current_close, history_for_code, min_days=20):
     """判斷是否符合「主升段確認」：站上20日均線、20日均線向上、且20MA在60MA之上
-    history_for_code: [(date_str, close), ...] 由舊到新排序
-    資料不足 min_days 天時回傳 False（不判斷，避免用不足的資料誤判）
+
+    current_close: 今天的收盤價（來自 stock_day，不是資料庫歷史）
+    history_for_code: [(date_str, close), ...] 由舊到新排序，「不含今天」
+
+    ⚠️ 之前的版本直接把 history_for_code 的最後一筆當成「今天」，但這批歷史資料是
+    從 Supabase 撈的，這次執行還沒把今天收盤價寫回資料庫，所以最後一筆其實是
+    上一個交易日，等於整個判斷都慢了一天、完全沒用到今天真正發生的價格變化。
+    現在改成把「今天」當獨立參數傳進來，跟其他量能相關的函式（compute_vol_ratio /
+    compute_vol_zscore）用同一套設計方式，避免同樣的錯誤。
+
+    資料不足 min_days 天（含今天）時回傳 False（不判斷，避免用不足的資料誤判）
     """
-    if len(history_for_code) < min_days:
+    closes = [c for _, c in history_for_code] + [current_close]
+    if len(closes) < min_days:
         return False
-    closes = [c for _, c in history_for_code]
     ma20_today = sum(closes[-20:]) / 20
     price_today = closes[-1]
     above_ma20 = price_today > ma20_today
@@ -699,9 +708,9 @@ def compute_signal_scores(stock_day, institutional, pe_pb, revenue, price_histor
             net_signal += 1
             bull_tags.append(f"營收動能加速（年增{rev['revenue_yoy_pct']:.1f}%）")
 
-        # 主升段確認：站上上揚的20日均線，且20MA在60MA之上（需要至少20天歷史資料）
+        # 主升段確認：站上上揚的20日均線，且20MA在60MA之上（需要至少20天歷史資料，含今天）
         hist = price_history.get(code, [])
-        if compute_ma_trend(hist):
+        if compute_ma_trend(close, hist):
             net_signal += 1
             bull_tags.append("主升段確認")
 
