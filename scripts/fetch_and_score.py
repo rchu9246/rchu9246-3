@@ -602,6 +602,7 @@ def fetch_pe_pb():
 #   附加參考標籤（純資訊性，目前不影響 net_signal 計分）：
 #     法人連續買超/賣超天數 >= 3 天時，會在多頭/空頭訊號欄位標記「法人連續買超N天」
 #     或「法人連續賣超N天」，資料缺失（T86抓取失敗）的那天視為連續天數中斷，不瞎猜
+#     單日振幅（ATR%）> RISK_AMPLITUDE_PCT（跟風險分數用同一個門檻）時標記「ATR波動風險」
 #   最終 recommendation 依 net_signal 對照（門檻值沒變，但因為新增了三個正向維度，
 #   理論上 strong-bull 的檔數會比 v1 版本多一些，這是預期中的行為，門檻值可依實際回測再調）：
 #     net_signal >= 3      → strong-bull 🚀 強多候選
@@ -957,6 +958,14 @@ def compute_signal_scores(stock_day, institutional, pe_pb, revenue, price_histor
             bull_tags.append(f"法人連續買超{consecutive_buy_days}天")
         if consecutive_sell_days_signal >= 3:
             bear_tags.append(f"法人連續賣超{consecutive_sell_days_signal}天")
+
+        # ATR波動風險：跟 compute_risk_scores 用同一套振幅門檻（RISK_AMPLITUDE_PCT），
+        # 純資訊性標籤，不影響 net_signal 計分。風險頁本來就有算這個振幅（atr_pct），
+        # 但訊號中心之前完全沒有把它轉成看得到的標籤，只有去風險頁才看得到，
+        # 現在讓訊號中心也能一眼看出「這檔股票雖然訊號不錯，但當天波動很大」。
+        amplitude_pct = ((sd["high"] - sd["low"]) / close * 100) if close else 0
+        if amplitude_pct > RISK_AMPLITUDE_PCT:
+            bear_tags.append("ATR波動風險")
 
         # 買賣超強度判斷：跟 SCORING RULES 文件寫的一致，用「20日均量」當基準，
         # 不是今天的成交量——今天的量本身可能就是因為法人大買/大賣才變大的，
