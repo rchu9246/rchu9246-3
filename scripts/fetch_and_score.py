@@ -272,9 +272,14 @@ def fetch_institutional_t86():
         code = str(row[idx_code]).strip()
         if not code:
             continue
-        foreign_net = safe_float(row[idx_foreign]) if idx_foreign is not None else 0
-        trust_net = safe_float(row[idx_trust]) if idx_trust is not None else 0
-        dealer_net = safe_float(row[idx_dealer]) if idx_dealer is not None else 0
+        # 股數本來就一定是整數，這裡用 int() 而不是留著 safe_float() 回傳的 float，
+        # 是因為 Supabase 的 foreign_net/trust_net/dealer_net/institutional_net 這幾欄
+        # 是 bigint，如果寫入的數字帶著小數點（即使小數部分是 .0，例如 15000.0），
+        # Postgres 的 bigint 解析器會直接拒絕、回傳 22P02 錯誤，之前 T86 一直抓不到
+        # 真實資料所以沒踩到，這次 T86 終於抓到資料才第一次暴露這個問題。
+        foreign_net = int(safe_float(row[idx_foreign])) if idx_foreign is not None else 0
+        trust_net = int(safe_float(row[idx_trust])) if idx_trust is not None else 0
+        dealer_net = int(safe_float(row[idx_dealer])) if idx_dealer is not None else 0
         out[code] = {
             "foreign_net": foreign_net,
             "trust_net": trust_net,
