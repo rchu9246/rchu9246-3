@@ -866,7 +866,9 @@ async function loadGlobalData() {
 
   latestRows.forEach(r => {
     if (r.factor_code === 'TAIEX') {
-      taiexData = { close: r.value };
+      let extra = { d5: null, d20: null, d60: null };
+      try { extra = { ...extra, ...JSON.parse(r.note) }; } catch (e) { /* 舊資料或格式異常，忽略 */ }
+      taiexData = { close: r.value, chg: r.chg_pct, d5: extra.d5, d20: extra.d20, d60: extra.d60 };
       return;
     }
     if (r.category === '匯率' || r.category === '半導體') {
@@ -946,11 +948,10 @@ function renderTaiexStrip() {
     ['taiex-d5', 'taiex-d20', 'taiex-d60'].forEach(id => document.getElementById(id).textContent = '');
     return;
   }
-  closeEl.textContent = taiexData.close.toLocaleString();
-  // 5/20/60日% 目前後端還沒存 TAIEX 自己的歷史百分比，先留空不瞎猜
-  document.getElementById('taiex-d5').textContent = '';
-  document.getElementById('taiex-d20').textContent = '';
-  document.getElementById('taiex-d60').textContent = '';
+  closeEl.innerHTML = `${taiexData.close.toLocaleString()} ${taiexData.chg !== null && taiexData.chg !== undefined ? fmtPct(taiexData.chg) : ''}`;
+  document.getElementById('taiex-d5').innerHTML = `5日 ${fmtPctOrDash(taiexData.d5)}`;
+  document.getElementById('taiex-d20').innerHTML = `20日 ${fmtPctOrDash(taiexData.d20)}`;
+  document.getElementById('taiex-d60').innerHTML = `60日 ${fmtPctOrDash(taiexData.d60)}`;
 }
 
 async function loadStatus() {
