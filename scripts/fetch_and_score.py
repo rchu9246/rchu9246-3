@@ -305,6 +305,47 @@ def fetch_taiex_index():
     return None
 
 
+def fetch_backtest_raw_data(lookback_days):
+    """回測需要兩份歷史資料：
+      (1) signal_scores 每天的推薦名單（code + recommendation）
+      (2) stock_daily 每天的開盤價/收盤價
+    抓取範圍用日曆天數做寬鬆篩選（乘 1.6 倍再加緩衝天數），確保涵蓋到
+    lookback_days+1 個交易日——多抓一天是因為要驗證「最後一個基準日」的隔天
+    開盤價也要在範圍內，才能算出那一天的回測結果。
+
+    回傳：(signal_by_date, price_by_date)
+      signal_by_date: {trade_date: [(code, recommendation), ...]}
+      price_by_date:  {trade_date: {code: {"close":..., "open":...}}}
+      price 的 open 保留 None 語意：None 代表那天還沒有開盤價紀錄
+      （這個欄位是這次才開始寫入的，部署之前的舊資料沒有這筆）
+    """
+    cutoff_date = (date.today() - timedelta(days=int((lookback_days + 1) * 1.6) + 3)).isoformat()
+
+    signal_rows = supabase_select(
+        "signal_scores",
+        f"select=code,trade_date,recommendation&trade_date=gte.{cutoff_date}&order=trade_date.desc",
+    )
+    signal_by_date = {}
+    for r in signal_rows:
+        d = r.get("trade_date")
+        signal_by_date.setdefault(d, []).append((r.get("code"), r.get("recommendation")))
+
+    price_rows = supabase_select(
+        "stock_daily",
+        f"select=code,trade_date,close,open&trade_date=gte.{cutoff_date}&order=trade_date.desc",
+    )
+    price_by_date = {}
+    for r in price_rows:
+        d = r.get("trade_date")
+        code = r.get("code")
+        open_raw = r.get("open")
+        price_by_date.setdefault(d, {})[code] = {
+            "close": safe_float(r.get("close")),
+            "open": None if open_raw is None else safe_float(open_raw),
+        }
+    return signal_by_date, price_by_date
+
+
 def fetch_recent_explosion_confirms(lookback_days=10):
     """從 explosion_scores 表撈近期（約 lookback_days 個交易日內）曾經是「爆發確認」
     的股票，及當時記錄的 20 日箱頂價格，用來判斷今天是不是處在「爆發後回測」階段。
@@ -801,6 +842,77 @@ EXPLOSION_VOL_ZSCORE_MAX_POINTS = 15  # 量能維度（滿分40）裡，「z-sco
 EXPLOSION_VOL_ZSCORE_CAP = 4.0        # z-score 超過這個值，額外分數不再往上加
 
 
+BACKTEST_LOOKBACK_DAYS = 4  # 隔日開盤回測的滾動樣本天數
+
+# 回測分類：key -> (符合這個分類的判斷函式, 「命中」的方向)
+# bull_all/bear_all 是額外聚合的大類（strong-bull+bull 合併看、pullback+avoid 合併看），
+# 方便一次看整體多頭/空頭候選的勝率，不用逐一分類別看
+BACKTEST_CATEGORIES = {
+    "strong_bull": (lambda rec: rec == "strong-bull", "up"),
+    "bull": (lambda rec: rec == "bull", "up"),
+    "bull_all": (lambda rec: rec in ("strong-bull", "bull"), "up"),
+    "pullback": (lambda rec: rec == "pullback", "down"),
+    "avoid": (lambda rec: rec == "avoid", "down"),
+    "bear_all": (lambda rec: rec in ("pullback", "avoid"), "down"),
+}
+
+
+def compute_backtest_stats(lookback_days=BACKTEST_LOOKBACK_DAYS):
+    """算「隔日開盤回測」勝率：抓最近幾個交易日的訊號推薦名單，對照隔一個交易日的
+    開盤價，驗證推薦方向對不對——多頭類（strong-bull/bull）預期隔日開盤價格會比
+    前一天收盤高，空頭類（pullback/avoid）預期會比較低，算出符合預期的比例。
+
+    ⚠️ 這個功能依賴 stock_daily 的 open 欄位，這是這次才開始寫入的，部署當天
+    之前的舊資料沒有開盤價紀錄，回測會從部署那天開始逐漸累積到 lookback_days
+    天的完整樣本，不會一部署就馬上有完整的樣本。
+    """
+    signal_by_date, price_by_date = fetch_backtest_raw_data(lookback_days)
+    trade_dates = sorted(price_by_date.keys())
+
+    # 找出「有隔天開盤價可以驗證」的基準日：D 本身要有 signal_scores 推薦名單，
+    # D 的下一個交易日（trade_dates 裡緊接在後面那個）要存在，回測才有東西可以比對
+    evaluable_dates = []
+    for i, d in enumerate(trade_dates[:-1]):
+        next_d = trade_dates[i + 1]
+        if d in signal_by_date:
+            evaluable_dates.append((d, next_d))
+    evaluable_dates = evaluable_dates[-lookback_days:]  # 只取最近 lookback_days 個可驗證的基準日
+
+    stats = {key: {"total": 0, "success": 0} for key in BACKTEST_CATEGORIES}
+
+    for d, next_d in evaluable_dates:
+        recs = signal_by_date.get(d, [])
+        d_prices = price_by_date.get(d, {})
+        next_prices = price_by_date.get(next_d, {})
+        for code, recommendation in recs:
+            close_d = d_prices.get(code, {}).get("close")
+            open_next = next_prices.get(code, {}).get("open")
+            if not close_d or open_next is None:
+                continue  # 沒有隔天開盤價可比對（停牌、或還沒累積到有 open 的資料）
+            pct_change = (open_next - close_d) / close_d * 100
+            for key, (match_fn, direction) in BACKTEST_CATEGORIES.items():
+                if not match_fn(recommendation):
+                    continue
+                stats[key]["total"] += 1
+                success = (pct_change > 0) if direction == "up" else (pct_change < 0)
+                if success:
+                    stats[key]["success"] += 1
+
+    rows = []
+    for key, s in stats.items():
+        win_rate = round(s["success"] / s["total"] * 100, 1) if s["total"] > 0 else None
+        rows.append({
+            "trade_date": TODAY,
+            "category": key,
+            "lookback_days": lookback_days,
+            "sample_dates": len(evaluable_dates),
+            "total_count": s["total"],
+            "success_count": s["success"],
+            "win_rate": win_rate,
+        })
+    return rows
+
+
 def recommendation_for(net_signal):
     for threshold, rec, label in SIGNAL_NET_TO_REC:
         if net_signal >= threshold:
@@ -1132,7 +1244,7 @@ def main():
         chg_pct = (sd["change"] / (sd["close"] - sd["change"]) * 100) if (sd["close"] - sd["change"]) else 0
         daily_rows.append({
             "code": code, "name": sd["name"], "trade_date": TODAY,
-            "close": sd["close"], "chg_pct": round(chg_pct, 2), "volume": int(sd["volume"]),
+            "close": sd["close"], "open": sd["open"], "chg_pct": round(chg_pct, 2), "volume": int(sd["volume"]),
             "foreign_net": inst.get("foreign_net"), "trust_net": inst.get("trust_net"),
             "dealer_net": inst.get("dealer_net"), "institutional_net": inst.get("institutional_net"),
         })
@@ -1148,6 +1260,16 @@ def main():
     supabase_upsert("risk_scores", risk_rows, "code,trade_date")
     supabase_upsert("global_factors", global_rows, "factor_code,trade_date")
     supabase_upsert("liquidity_scores", liquidity_rows, "code,trade_date")
+
+    # 回測必須排在 stock_daily 寫入「之後」才算——回測驗證「昨天的推薦」用的是
+    # 「今天的開盤價」，而今天的開盤價要等上面 stock_daily 那行 upsert 完成後，
+    # 才會存在資料庫裡、可以被回測查回來用。如果順序寫反，回測會永遠少驗證到
+    # 最新的一天，變成每次都慢一拍。
+    print("計算隔日開盤回測統計...")
+    backtest_rows = compute_backtest_stats()
+    sample_dates = backtest_rows[0]["sample_dates"] if backtest_rows else 0
+    print(f"  樣本涵蓋 {sample_dates} 個交易日（目標 {BACKTEST_LOOKBACK_DAYS} 天，累積中屬正常）")
+    supabase_upsert("backtest_stats", backtest_rows, "trade_date,category")
 
     status_row = [{
         "id": 1,
