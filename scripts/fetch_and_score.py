@@ -134,33 +134,45 @@ def fetch_monthly_revenue():
 
 
 def fetch_price_and_volume_history():
-    """從 Supabase 撈每檔股票近期收盤價 + 成交量歷史，一次查詢同時取出兩者。
+    """從 Supabase 撈每檔股票近期收盤價 + 成交量 + 法人買賣超歷史，一次查詢同時取出三者。
 
     原本這是兩個獨立函式（fetch_price_history / fetch_volume_history），各自對
     stock_daily 整張表分頁查詢一次——但兩者查的是同一批列，只是選的欄位不同，
     等於同一份資料被完整抓了兩遍。隨著資料庫累積的交易日變多，這張表會越來越大，
     重複查詢的成本也跟著變大，所以合併成一次查詢、一次分頁，各自組成獨立的
-    {code: [(date, value), ...]} 結構回傳，避免收盤價/成交量的 tuple 順序搞混。
+    {code: [(date, value), ...]} 結構回傳，避免收盤價/成交量/法人買賣超的 tuple 順序搞混。
+
+    ⚠️ institutional_net 這欄跟收盤價/成交量不一樣，特意不用 safe_float()（會把
+    None 當成 0.0），而是保留 None：None 代表「那天 T86 抓取失敗，不知道法人買賣超
+    狀態」，0 代表「那天真的有抓到資料，法人買賣超剛好淨零」，兩者意義不同，算連續
+    賣超天數時混在一起會誤判（把「不知道」當成「沒有賣超」而錯誤中斷連續天數，
+    或反過來誤算成有賣超）。
     """
     rows = supabase_select(
         "stock_daily",
-        "select=code,trade_date,close,volume&order=trade_date.desc",
+        "select=code,trade_date,close,volume,institutional_net&order=trade_date.desc",
     )
     price_history = {}
     volume_history = {}
+    institutional_history = {}
     for r in rows:
         code = r.get("code")
         trade_date = r.get("trade_date")
         if code not in price_history:
             price_history[code] = []
             volume_history[code] = []
+            institutional_history[code] = []
         price_history[code].append((trade_date, safe_float(r.get("close"))))
         volume_history[code].append((trade_date, safe_float(r.get("volume"))))
+        inst_net_raw = r.get("institutional_net")
+        inst_net = None if inst_net_raw is None else safe_float(inst_net_raw)
+        institutional_history[code].append((trade_date, inst_net))
     # 依日期由舊到新排序
     for code in price_history:
         price_history[code].sort(key=lambda x: x[0])
         volume_history[code].sort(key=lambda x: x[0])
-    return price_history, volume_history
+        institutional_history[code].sort(key=lambda x: x[0])
+    return price_history, volume_history, institutional_history
 
 
 def safe_float(v, default=0.0):
@@ -597,6 +609,29 @@ def compute_boll_position_pct(current_close, history_for_code, period=20, k=2, m
     return round((current_close - lower) / (upper - lower) * 100, 2)
 
 
+def compute_consecutive_sell_days(current_inst_net, history_for_code):
+    """算「法人連續賣超天數」：從今天開始往回數，遇到賣超（淨額 < 0）就繼續累加，
+    遇到買超/持平（>= 0）或資料缺失（None，代表那天 T86 抓取失敗、不知道狀態）
+    就停止往回數。
+
+    資料缺失的那天無法確認是否真的賣超，保守起見直接視為連續天數中斷，不繼續
+    往回數，避免把「不知道」誤算成「有賣超」而高估連續天數。
+
+    current_inst_net: 今天的法人合計買賣超（來自 institutional 字典，T86 抓取
+      失敗時上層會 fallback 成 0，等於今天視為「無賣超」，這是跟既有程式碼其他地方
+      處理法人資料缺失時一致的作法，不另外特殊處理）
+    history_for_code: [(date_str, institutional_net_or_None), ...] 由舊到新排序（不含今天）
+    """
+    values = [v for _, v in history_for_code] + [current_inst_net]
+    count = 0
+    for v in reversed(values):
+        if v is not None and v < 0:
+            count += 1
+        else:
+            break
+    return count
+
+
 def compute_ma_trend(current_close, history_for_code, min_days=20):
     """判斷是否符合「主升段確認」：站上20日均線、20日均線向上、且20MA在60MA之上
 
@@ -813,7 +848,7 @@ def compute_explosion_scores(stock_day, volume_history, price_history):
 RISK_LOW_VOL_RATIO = 0.5        # 量比低於此值視為量縮流動性差
 
 
-def compute_risk_scores(stock_day, institutional, volume_history):
+def compute_risk_scores(stock_day, institutional, volume_history, institutional_history):
     rows = []
     for code, sd in stock_day.items():
         close, high, low, vol = sd["close"], sd["high"], sd["low"], sd["volume"]
@@ -824,6 +859,7 @@ def compute_risk_scores(stock_day, institutional, volume_history):
         inst_net = inst.get("institutional_net", 0)
         # 資料不足（歷史天數太少）時回傳 None，代表這條規則本次不判斷，不當作「量縮」處理
         vol_ratio = compute_vol_ratio(vol, volume_history.get(code, []))
+        consecutive_sell_days = compute_consecutive_sell_days(inst_net, institutional_history.get(code, []))
 
         score = 0.0
         main_risks = []
@@ -860,7 +896,7 @@ def compute_risk_scores(stock_day, institutional, volume_history):
             "chg_pct": round(chg_pct, 2),
             "vol_ratio": vol_ratio,
             "atr_pct": round(amplitude_pct, 2),
-            "consecutive_sell_days": None,
+            "consecutive_sell_days": consecutive_sell_days,
             "liquidity_score": None,
             "note": f"當日跌幅 {chg_pct:.2f}%；{'、'.join(main_risks)}",
         })
@@ -898,8 +934,8 @@ def main():
     revenue = fetch_monthly_revenue()
     print(f"  取得 {len(revenue)} 檔")
 
-    print("讀取歷史股價與成交量（算主升段/交易性風險/流動性/爆發前兆用）...")
-    price_history, volume_history = fetch_price_and_volume_history()
+    print("讀取歷史股價/成交量/法人買賣超（算主升段/交易性風險/流動性/爆發前兆/連續賣超天數用）...")
+    price_history, volume_history, institutional_history = fetch_price_and_volume_history()
     days_available = max((len(v) for v in price_history.values()), default=0)
     print(f"  目前資料庫累積約 {days_available} 個交易日歷史（需要 ≥20 天才會開始判斷主升段）")
 
@@ -916,7 +952,7 @@ def main():
     print(f"  產出 {len(explosion_rows)} 筆（分數達門檻者）")
 
     print("計算風險分數...")
-    risk_rows = compute_risk_scores(stock_day, institutional, volume_history)
+    risk_rows = compute_risk_scores(stock_day, institutional, volume_history, institutional_history)
     print(f"  產出 {len(risk_rows)} 筆（分數達門檻者）")
 
     print("計算交易性風險/流動性...")
