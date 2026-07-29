@@ -682,24 +682,43 @@ function renderRisk(){
   });
 }
 
-// 交易性風險（流動性）目前尚未在 fetch_and_score.py 中計算，
-// 若要啟用，需在 schema 補一張 liquidity_scores 表並在腳本中加入估算邏輯
-// （estimate = 100張約當金額 / 20日均量金額），此處先留空清單。
 let liquidityData = [];
+
+async function loadLiquidityData() {
+  const raw = await sb('liquidity_scores', 'order=trade_date.desc,liquidity_risk_score.desc&limit=300');
+  const seenCodes = new Set();
+  liquidityData = raw.filter(r => {
+    if (seenCodes.has(r.code)) return false;
+    seenCodes.add(r.code);
+    return true;
+  }).map(r => ({
+    code: r.code, name: r.name, close: r.close,
+    vol20: r.avg_volume_20d, days: r.avg_volume_days,
+    value: r.est_trade_value_million, pct: r.pct_100lots_of_avg,
+    riskScore: r.liquidity_risk_score, liq: r.liquidity_label,
+  }));
+}
+
+function liquidityColor(score){
+  if(score>=80) return '#8a2f2f';
+  if(score>=60) return '#a5522f';
+  return '#7a5230';
+}
 
 function renderLiquidity(){
   const body = document.getElementById('liquidity-body');
   if (liquidityData.length === 0) {
-    body.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--sub);padding:20px;">此區塊尚未串接（見程式註解說明）</td></tr>';
+    body.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--sub);padding:20px;">尚無資料，請確認 Supabase 連線設定與排程是否已執行過</td></tr>';
     return;
   }
   body.innerHTML = '';
   liquidityData.forEach(r=>{
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td class="num">${r.code}</td><td>${r.name}</td><td class="num">${r.close}</td>
-      <td class="num">${r.vol20}</td><td class="num">${r.value}</td><td class="num">${r.pct}</td>
-      <td><span class="score-cell" style="background:#7a5230;">${r.riskScore}</span></td><td>${r.liq}</td>
+      <td class="num">${r.code}</td><td>${r.name}</td><td class="num">${r.close.toFixed(2)}</td>
+      <td class="num">${r.vol20.toLocaleString()}${r.days<20?` <span style="color:var(--sub);font-size:11px;">(${r.days}日均)</span>`:''}</td>
+      <td class="num">${r.value.toFixed(2)}</td><td class="num">${r.pct.toFixed(1)}%</td>
+      <td><span class="score-cell" style="background:${liquidityColor(r.riskScore)};">${r.riskScore}</span></td><td>${r.liq}</td>
     `;
     body.appendChild(tr);
   });
