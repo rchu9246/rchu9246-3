@@ -769,7 +769,65 @@ function renderLiquidity(){
   });
 }
 
-// ---------- Page 4: Global ----------
+// ---------- Page 5: 三大法人 ----------
+let institutionalData = [];
+
+async function loadInstitutionalData() {
+  const raw = await sbLatest('stock_daily', 'trade_date', 1500);
+  institutionalData = raw.map(r => ({
+    code: r.code, name: r.name, close: r.close, chg: r.chg_pct,
+    foreign: r.foreign_net, trust: r.trust_net, dealer: r.dealer_net,
+    net: r.institutional_net,
+  })).filter(r => r.net !== null && r.net !== undefined);
+}
+
+let currentInstFilter = 'all';
+
+function toLots(shares) {
+  if (shares === null || shares === undefined) return 0;
+  return Math.round(shares / 1000);
+}
+
+function renderInstitutional(filter='all') {
+  currentInstFilter = filter;
+  const body = document.getElementById('institutional-body');
+  if (institutionalData.length === 0) {
+    body.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--sub);padding:20px;">尚無資料，可能是當天 T86 抓取失敗（這個端點不穩定），或排程還沒執行過</td></tr>';
+    document.getElementById('inst-count').textContent = '0/0';
+    return;
+  }
+  let rows = institutionalData;
+  if(filter==='buy') rows = rows.filter(r=>r.net>0);
+  if(filter==='sell') rows = rows.filter(r=>r.net<0);
+  rows = [...rows].sort((a,b)=>b.net - a.net);
+
+  document.getElementById('inst-count').textContent = `${rows.length}/${institutionalData.length}`;
+  body.innerHTML = '';
+  rows.slice(0,300).forEach((r,i)=>{
+    const tr = document.createElement('tr');
+    const netClass = r.net>0?'up':(r.net<0?'down':'');
+    tr.innerHTML = `
+      <td>${i+1}</td>
+      <td class="num">${r.code}</td>
+      <td>${r.name}</td>
+      <td class="num">${r.close.toFixed(2)}</td>
+      <td>${fmtPct(r.chg)}</td>
+      <td class="num">${toLots(r.foreign).toLocaleString()}</td>
+      <td class="num">${toLots(r.trust).toLocaleString()}</td>
+      <td class="num">${toLots(r.dealer).toLocaleString()}</td>
+      <td class="num ${netClass}" style="font-weight:700;">${toLots(r.net).toLocaleString()}</td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
+function setInstFilter(el, f){
+  document.querySelectorAll('#page-institutional .chip').forEach(c=>c.classList.remove('active'));
+  el.classList.add('active');
+  renderInstitutional(f);
+}
+
+// ---------- Page 4: Global ----------// ---------- Page 4: Global ----------
 // 資料來源：Supabase global_factors 表
 // 「主要股市對照/原物料」用的 ETF 5日/20日/60日% 是後端算好後塞進 note 欄位的 JSON
 // （因為 schema 沒有另外開欄位存這三個數字，用 JSON.parse(note) 取出）
