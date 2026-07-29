@@ -525,7 +525,7 @@ def fetch_pe_pb():
 # 【訊號分數 net_signal】（v2：新增財務底色 / 營收動能 / 主升段 三個維度）
 #   +1  法人（三大合計）買超股數 > 0
 #   +1  法人買超股數 > 該股 20 日均量的 5%（買超強度夠大；資料不足20天時fallback用今日成交量當基準）
-#   +1  今日漲跌 > 0 且成交量 > 昨日（價量齊揚，此簡化版用「今日量>0」近似）
+#   +1  今日漲跌 > 0 且今日成交量 > 昨日成交量（價量齊揚；沒有昨天資料時fallback只看漲跌）
 #   +1  財務底色佳：本益比介於 0~25（有獲利、不過度昂貴）且殖利率 > 1.5% 且股價淨值比 0~4
 #   +1  營收動能加速：最新月營收年增率 > 20%
 #   +1  主升段確認：站上上揚的20日均線、且20MA在60MA之上（需資料庫累積 ≥20 個交易日才會判斷，不足時不加分也不扣分）
@@ -787,9 +787,18 @@ def compute_signal_scores(stock_day, institutional, pe_pb, revenue, price_histor
             net_signal -= 1
             bear_tags.append("賣超強度大")
 
-        if chg_pct > 0:
+        # 價量齊揚：今日漲跌>0 且今日成交量>昨日成交量。原本這條規則因為函式沒拿到
+        # 歷史成交量資料，只能簡化成「今日漲跌>0」，忽略「成交量>昨日」那半段；
+        # 現在 volume_history 已經傳進來了，補上真正的量增判斷。沒有昨天資料時
+        # （新股或資料庫剛開始累積）fallback 回原本「只看漲跌」的簡化版，不會因為
+        # 缺資料就整條規則失效。
+        hist_vol = volume_history.get(code, [])
+        yesterday_volume = hist_vol[-1][1] if hist_vol else None
+        price_up = chg_pct > 0
+        volume_up = yesterday_volume is None or sd["volume"] > yesterday_volume
+        if price_up and volume_up:
             net_signal += 1
-            bull_tags.append("價漲")
+            bull_tags.append("價量齊揚" if yesterday_volume is not None else "價漲")
         if chg_pct <= RISK_DROP_LIMIT_PCT:
             net_signal -= 1
             bear_tags.append("單日重挫")
