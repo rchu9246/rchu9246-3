@@ -532,6 +532,9 @@ def fetch_pe_pb():
 #   -1  法人賣超股數 > 0
 #   -1  法人賣超股數 > 該股 20 日均量的 5%（同上，資料不足時fallback用今日成交量）
 #   -1  今日跌幅 > 5%（單日重挫）
+#   附加參考標籤（純資訊性，目前不影響 net_signal 計分）：
+#     法人連續買超/賣超天數 >= 3 天時，會在多頭/空頭訊號欄位標記「法人連續買超N天」
+#     或「法人連續賣超N天」，資料缺失（T86抓取失敗）的那天視為連續天數中斷，不瞎猜
 #   最終 recommendation 依 net_signal 對照（門檻值沒變，但因為新增了三個正向維度，
 #   理論上 strong-bull 的檔數會比 v1 版本多一些，這是預期中的行為，門檻值可依實際回測再調）：
 #     net_signal >= 3      → strong-bull 🚀 強多候選
@@ -688,6 +691,27 @@ def compute_consecutive_sell_days(current_inst_net, history_for_code):
     return count
 
 
+def compute_consecutive_buy_days(current_inst_net, history_for_code):
+    """算「法人連續買超天數」，跟 compute_consecutive_sell_days 對稱、方向相反：
+    從今天開始往回數，遇到買超（淨額 > 0）就繼續累加，遇到賣超/持平（<= 0）或
+    資料缺失（None，代表那天 T86 抓取失敗、不知道狀態）就停止往回數。
+
+    資料缺失的那天無法確認是否真的買超，一樣保守視為連續天數中斷，理由跟
+    compute_consecutive_sell_days 相同，不重複贅述。
+
+    current_inst_net: 今天的法人合計買賣超
+    history_for_code: [(date_str, institutional_net_or_None), ...] 由舊到新排序（不含今天）
+    """
+    values = [v for _, v in history_for_code] + [current_inst_net]
+    count = 0
+    for v in reversed(values):
+        if v is not None and v > 0:
+            count += 1
+        else:
+            break
+    return count
+
+
 def compute_ma_trend(current_close, history_for_code, min_days=20):
     """判斷是否符合「主升段確認」：站上20日均線、20日均線向上、且20MA在60MA之上
 
@@ -755,7 +779,7 @@ def recommendation_for(net_signal):
     return "avoid", "🚫 避開"
 
 
-def compute_signal_scores(stock_day, institutional, pe_pb, revenue, price_history, volume_history):
+def compute_signal_scores(stock_day, institutional, pe_pb, revenue, price_history, volume_history, institutional_history):
     rows = []
     for code, sd in stock_day.items():
         inst = institutional.get(code, {})
@@ -772,6 +796,18 @@ def compute_signal_scores(stock_day, institutional, pe_pb, revenue, price_histor
         elif inst_net < 0:
             net_signal -= 1
             bear_tags.append("法人賣超")
+
+        # 法人連續買超/賣超天數：純資訊性標籤，不影響 net_signal 計分（跟
+        # consecutive_sell_days 剛補實作時的做法一致，先讓標籤準確，之後有需要
+        # 再考慮要不要納入計分）。門檻設 3 天以上才標記，避免每天都在切換方向
+        # 的正常波動也被貼標籤，稀釋掉真正持續買超/賣超的訊號。
+        hist_inst = institutional_history.get(code, [])
+        consecutive_buy_days = compute_consecutive_buy_days(inst_net, hist_inst)
+        consecutive_sell_days_signal = compute_consecutive_sell_days(inst_net, hist_inst)
+        if consecutive_buy_days >= 3:
+            bull_tags.append(f"法人連續買超{consecutive_buy_days}天")
+        if consecutive_sell_days_signal >= 3:
+            bear_tags.append(f"法人連續賣超{consecutive_sell_days_signal}天")
 
         # 買賣超強度判斷：跟 SCORING RULES 文件寫的一致，用「20日均量」當基準，
         # 不是今天的成交量——今天的量本身可能就是因為法人大買/大賣才變大的，
@@ -1035,7 +1071,7 @@ def main():
         sys.exit(1)
 
     print("計算訊號分數...")
-    signal_rows = compute_signal_scores(stock_day, institutional, pe_pb, revenue, price_history, volume_history)
+    signal_rows = compute_signal_scores(stock_day, institutional, pe_pb, revenue, price_history, volume_history, institutional_history)
     print(f"  產出 {len(signal_rows)} 筆")
 
     print("計算爆發前兆分數...")
