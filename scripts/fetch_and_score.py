@@ -518,6 +518,21 @@ def fetch_pe_pb():
 # 這些門檻值都寫在下面常數區，方便你之後調整。
 # --------------------------------------------------------------------------
 
+def compute_vol_ratio(current_volume, history_for_code, min_days=3, lookback=20):
+    """算「量比」：今日成交量 ÷ 近期（最多 lookback 天）平均成交量。
+    history_for_code: [(date_str, volume), ...] 由舊到新排序（不含今天）
+    資料不足 min_days 天時回傳 None（不瞎猜，讓呼叫端自己決定要 fallback 成中性值還是跳過該規則）
+    """
+    recent = history_for_code[-lookback:]
+    volumes = [v for _, v in recent if v > 0]
+    if len(volumes) < min_days:
+        return None
+    avg_volume = sum(volumes) / len(volumes)
+    if avg_volume <= 0:
+        return None
+    return round(current_volume / avg_volume, 2)
+
+
 def compute_ma_trend(history_for_code, min_days=20):
     """判斷是否符合「主升段確認」：站上20日均線、20日均線向上、且20MA在60MA之上
     history_for_code: [(date_str, close), ...] 由舊到新排序
@@ -651,7 +666,7 @@ def compute_signal_scores(stock_day, institutional, pe_pb, revenue, price_histor
     return rows
 
 
-def compute_explosion_scores(stock_day):
+def compute_explosion_scores(stock_day, volume_history):
     rows = []
     for code, sd in stock_day.items():
         close, high, low, vol = sd["close"], sd["high"], sd["low"], sd["volume"]
@@ -659,8 +674,11 @@ def compute_explosion_scores(stock_day):
             continue
         chg_pct = (sd["change"] / (close - sd["change"]) * 100) if (close - sd["change"]) else 0
 
-        # 量比：沒有歷史均量時先用 1 當基準（正式上線請接歷史 20 日均量取代）
-        vol_ratio_20 = 1.0
+        # 量比：今日量 ÷ 近20日均量。資料不足（如新股或資料庫剛開始累積）時，
+        # 用 1.0（今日量=均量，中性值）當 fallback，避免資料不足時被誤判成爆量或量縮
+        vol_ratio_20 = compute_vol_ratio(vol, volume_history.get(code, []))
+        if vol_ratio_20 is None:
+            vol_ratio_20 = 1.0
         vol_score = min(vol_ratio_20, 5) / 5 * 40
         chg_score = min(max(chg_pct, 0), 10) / 10 * 30
         if high > low:
@@ -697,7 +715,10 @@ def compute_explosion_scores(stock_day):
     return rows
 
 
-def compute_risk_scores(stock_day, institutional):
+RISK_LOW_VOL_RATIO = 0.5        # 量比低於此值視為量縮流動性差
+
+
+def compute_risk_scores(stock_day, institutional, volume_history):
     rows = []
     for code, sd in stock_day.items():
         close, high, low, vol = sd["close"], sd["high"], sd["low"], sd["volume"]
@@ -706,6 +727,8 @@ def compute_risk_scores(stock_day, institutional):
         chg_pct = (sd["change"] / (close - sd["change"]) * 100) if (close - sd["change"]) else 0
         inst = institutional.get(code, {})
         inst_net = inst.get("institutional_net", 0)
+        # 資料不足（歷史天數太少）時回傳 None，代表這條規則本次不判斷，不當作「量縮」處理
+        vol_ratio = compute_vol_ratio(vol, volume_history.get(code, []))
 
         score = 0.0
         main_risks = []
@@ -719,6 +742,9 @@ def compute_risk_scores(stock_day, institutional):
         if amplitude_pct > RISK_AMPLITUDE_PCT:
             score += 15
             main_risks.append("量價背離/高波動")
+        if vol_ratio is not None and vol_ratio < RISK_LOW_VOL_RATIO:
+            score += 10
+            main_risks.append("量縮流動性差")
 
         if score >= 80:
             level = "high"
@@ -737,7 +763,7 @@ def compute_risk_scores(stock_day, institutional):
             "suggested_action": "暫不追價，先觀察" if level == "high" else "避開新買，留意反彈",
             "close": close,
             "chg_pct": round(chg_pct, 2),
-            "vol_ratio": None,
+            "vol_ratio": vol_ratio,
             "atr_pct": round(amplitude_pct, 2),
             "consecutive_sell_days": None,
             "liquidity_score": None,
@@ -794,11 +820,11 @@ def main():
     print(f"  產出 {len(signal_rows)} 筆")
 
     print("計算爆發前兆分數...")
-    explosion_rows = compute_explosion_scores(stock_day)
+    explosion_rows = compute_explosion_scores(stock_day, volume_history)
     print(f"  產出 {len(explosion_rows)} 筆（分數達門檻者）")
 
     print("計算風險分數...")
-    risk_rows = compute_risk_scores(stock_day, institutional)
+    risk_rows = compute_risk_scores(stock_day, institutional, volume_history)
     print(f"  產出 {len(risk_rows)} 筆（分數達門檻者）")
 
     print("計算交易性風險/流動性...")
