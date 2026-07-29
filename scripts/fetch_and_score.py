@@ -464,16 +464,120 @@ def pct_change_n_days_ago(history_for_code, n):
     return round((new_close - old_close) / old_close * 100, 2)
 
 
+def compute_correlation(returns_a, returns_b):
+    """算兩組報酬率序列的 Pearson 相關係數，不依賴 statistics.correlation()
+    （這個函式要 Python 3.10+ 才有，手動實作避免受限於執行環境的 Python 版本）。
+    兩個序列標準差任一為 0（完全沒有波動）時回傳 None，避免除以 0。
+    """
+    n = len(returns_a)
+    if n == 0 or n != len(returns_b):
+        return None
+    mean_a = sum(returns_a) / n
+    mean_b = sum(returns_b) / n
+    cov = sum((a - mean_a) * (b - mean_b) for a, b in zip(returns_a, returns_b))
+    var_a = sum((a - mean_a) ** 2 for a in returns_a)
+    var_b = sum((b - mean_b) ** 2 for b in returns_b)
+    if var_a == 0 or var_b == 0:
+        return None
+    return cov / (var_a ** 0.5 * var_b ** 0.5)
+
+
+def compute_vs_taiex_correlation(series_a, series_b, min_days=20, lookback=60):
+    """算 series_a（例如某檔ETF）跟 series_b（TAIEX）的近 lookback 個交易日「日報酬率」
+    相關係數，用來衡量這檔資產平常跟大盤走勢的連動程度：接近 +1 代表高度同向，
+    接近 -1 代表高度反向（避險特性），接近 0 代表關聯不大。
+    兩個序列都是 [(date, close), ...]，用日期對齊（避免其中一邊缺某天資料時，
+    位置對不上卻硬算出錯誤的相關係數）。可用天數不足 min_days 天時回傳 None。
+    """
+    dict_b = dict(series_b)
+    common_dates = sorted(d for d, _ in series_a if d in dict_b)
+    if len(common_dates) < min_days + 1:
+        return None
+    dict_a = dict(series_a)
+    common_dates = common_dates[-(lookback + 1):]  # 只取最近 lookback+1 天（+1是為了能算出lookback筆報酬率）
+    closes_a = [dict_a[d] for d in common_dates]
+    closes_b = [dict_b[d] for d in common_dates]
+    returns_a, returns_b = [], []
+    for i in range(1, len(closes_a)):
+        if closes_a[i - 1] and closes_b[i - 1]:
+            returns_a.append((closes_a[i] - closes_a[i - 1]) / closes_a[i - 1])
+            returns_b.append((closes_b[i] - closes_b[i - 1]) / closes_b[i - 1])
+    if len(returns_a) < min_days:
+        return None
+    corr = compute_correlation(returns_a, returns_b)
+    return round(corr, 2) if corr is not None else None
+
+
+def fetch_taifex_futures_night_session(contract="TX"):
+    """抓台指期近月合約的夜盤（盤後交易時段）收盤價，當隔夜開盤因子之一。
+    端點：期交所 OpenAPI /DailyMarketReportFut（期貨每日交易行情），這個端點路徑
+    跟欄位名稱是查證過的（見期交所官方 swagger.json），但沒辦法直接測試連線確認
+    TradingSession 這個欄位「夜盤」實際會寫哪個字串，所以用關鍵字比對抓「非日盤」
+    的那筆，並且把這次抓到的所有 TradingSession 值印出來，方便部署後對照 log
+    確認比對邏輯有沒有抓對——如果沒抓對，之後可以照實際印出來的值調整關鍵字。
+    """
+    try:
+        data = http_get_json("https://openapi.taifex.com.tw/v1/DailyMarketReportFut", timeout=20, retries=1)
+    except Exception as e:
+        print(f"[WARN] 期交所台指期資料抓取失敗：{e}")
+        return None
+
+    if not isinstance(data, list) or not data:
+        print("[WARN] 期交所台指期資料格式異常（預期是非空陣列）")
+        return None
+
+    tx_rows = [r for r in data if str(r.get("Contract", "")).strip() == contract]
+    if not tx_rows:
+        print(f"[WARN] 期交所資料裡找不到 {contract} 合約")
+        return None
+
+    sessions_seen = sorted(set(str(r.get("TradingSession", "")) for r in tx_rows))
+    print(f"[INFO] {contract} 這次抓到的 TradingSession 值：{sessions_seen}（用來核對夜盤比對邏輯有沒有抓對）")
+
+    # 近月合約：ContractMonth(Week) 依字串排序取最早到期的那一個（合約月份格式通常是
+    # YYYYMM，字串排序剛好等於時間先後排序）
+    tx_rows.sort(key=lambda r: str(r.get("ContractMonth(Week)", "")))
+    near_month = tx_rows[0].get("ContractMonth(Week)", "")
+    near_month_rows = [r for r in tx_rows if r.get("ContractMonth(Week)", "") == near_month]
+
+    # 挑「夜盤」那筆：常見代稱含這些關鍵字，用關鍵字比對而非完全比對字串，
+    # 增加對未知確切字串格式的容錯度
+    night_keywords = ["盤後", "夜", "AfterHour", "afterhour", "AFTER", "Night", "night", "AH"]
+    night_row = next(
+        (r for r in near_month_rows if any(kw in str(r.get("TradingSession", "")) for kw in night_keywords)),
+        None,
+    )
+    if night_row is None:
+        print(f"[WARN] {contract} 近月合約找不到符合夜盤關鍵字的資料列，"
+              f"TradingSession值：{[r.get('TradingSession') for r in near_month_rows]}")
+        return None
+
+    last = safe_float(night_row.get("Last"))
+    chg_pct_raw = night_row.get("%")
+    chg_pct = None
+    if chg_pct_raw not in (None, "", "-"):
+        chg_pct = safe_float(chg_pct_raw)
+    if chg_pct is None:
+        change = safe_float(night_row.get("Change"))
+        if last and (last - change):
+            chg_pct = round(change / (last - change) * 100, 2)
+    if not last:
+        return None
+    return {"close": last, "chg_pct": chg_pct, "contract_month": near_month}
+
+
 def compute_global_factors(stock_day, price_history):
     rows = []
 
     # 1. TAIEX 大盤指數
+    # taiex_hist 一律先抓（不管等一下 taiex_close 有沒有抓到），避免後面 ETF 迴圈要用
+    # 它算相關係數時，因為 taiex_close 抓取失敗導致這個變數根本沒被賦值而噴錯
     taiex_close = fetch_taiex_index()
+    taiex_hist = fetch_taiex_history()
     if taiex_close is not None:
         # taiex_hist 是「不含今天」的歷史（今天這筆要等這次執行最後 upsert 才會寫進
         # global_factors），跟其他歷史相關函式（compute_vol_ratio等）用同一套邏輯：
         # 今天的值當獨立參數，歷史只回推到昨天為止
-        taiex_hist = fetch_taiex_history()
         taiex_chg_pct = None
         if taiex_hist:
             prev_close = taiex_hist[-1][1]
@@ -495,8 +599,10 @@ def compute_global_factors(stock_day, price_history):
                 "note": "台灣證券交易所發行量加權股價指數",
             }, ensure_ascii=False),
         })
+    # 用來算 ETF 相關係數的完整序列（含今天，如果今天有抓到的話）
+    taiex_full_series = taiex_hist + ([(TODAY, taiex_close)] if taiex_close is not None else [])
 
-    # 2. 國際指數/匯率（Yahoo Finance）
+    # 2. 國際指數/匯率（Yahoo Finance）+ 台指期夜盤（期交所）
     yahoo_targets = [
         ("^SOX", "半導體", "費半 SOX", "台股電子/半導體最重要隔夜因子之一"),
         ("TWD=X", "匯率", "美元/台幣", "台幣貶值常代表外資壓力"),
@@ -510,6 +616,17 @@ def compute_global_factors(stock_day, price_history):
                 "factor_name": name, "value": q["close"], "chg_pct": q["chg_pct"],
                 "direction": direction, "impact_score": None, "note": note,
             })
+
+    night_fut = fetch_taifex_futures_night_session()
+    if night_fut:
+        chg_pct = night_fut["chg_pct"]
+        direction = "中性" if chg_pct is None else ("偏多" if chg_pct > 0 else ("偏空" if chg_pct < 0 else "中性"))
+        rows.append({
+            "factor_code": "TXF_NIGHT", "trade_date": TODAY, "category": "台指期夜盤",
+            "factor_name": "台指期近月(夜盤)", "value": night_fut["close"], "chg_pct": chg_pct,
+            "direction": direction, "impact_score": None,
+            "note": f"契約月份 {night_fut['contract_month']}，最直接反映台股隔日開盤預期",
+        })
 
     # 3. 台股掛牌的美股/原物料 ETF（資料已經在 stock_day 裡，只是重新整理格式）
     for code, meta in GLOBAL_ETF_MAP.items():
@@ -525,11 +642,12 @@ def compute_global_factors(stock_day, price_history):
         d5 = pct_change_n_days_ago(hist_with_today, 5)
         d20 = pct_change_n_days_ago(hist_with_today, 20)
         d60 = pct_change_n_days_ago(hist_with_today, 60)
+        corr_60d = compute_vs_taiex_correlation(hist_with_today, taiex_full_series)
         rows.append({
             "factor_code": f"ETF_{code}", "trade_date": TODAY, "category": meta["category"],
             "factor_name": meta["name"], "value": sd["close"], "chg_pct": round(chg_pct, 2),
             "direction": None, "impact_score": None,
-            "note": json.dumps({"code": code, "d5": d5, "d20": d20, "d60": d60, "note": meta["note"]}, ensure_ascii=False),
+            "note": json.dumps({"code": code, "d5": d5, "d20": d20, "d60": d60, "corr_60d": corr_60d, "note": meta["note"]}, ensure_ascii=False),
         })
 
     return rows
