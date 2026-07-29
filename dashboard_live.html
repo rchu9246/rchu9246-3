@@ -447,7 +447,34 @@
     <span>資料來源：Supabase（scripts/fetch_and_score.py 收盤後寫入）</span>
   </div>
 </div>
+<div class="page" id="page-institutional">
+  <div class="page-title">🏦 三大法人買賣超</div>
+  <div class="subtitle-box">
+    外資、投信、自營商買賣超股數，來源是證交所 T86 報表（見程式註解，這份端點不穩定，
+    如果某天顯示全部是 0，代表當天 T86 抓取失敗，不是資料庫壞了，改天重跑通常會恢復）。
+    單位：張（1張=1,000股）。
+  </div>
+  <div class="filter-row">
+    <div class="chip active" onclick="setInstFilter(this,'all')">全部</div>
+    <div class="chip" onclick="setInstFilter(this,'buy')">法人買超</div>
+    <div class="chip" onclick="setInstFilter(this,'sell')">法人賣超</div>
+    <div class="filter-meta">顯示 <b id="inst-count">0/0</b> 檔</div>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>#</th><th>代號</th><th>名稱</th><th>收盤</th><th>漲跌%</th><th>外資(張)</th><th>投信(張)</th><th>自營商(張)</th><th>三大法人合計(張)</th></tr>
+      </thead>
+      <tbody id="institutional-body"></tbody>
+    </table>
+  </div>
+  <div class="footer-bar">
+    <span>資料來源：Supabase stock_daily（T86 抓取成功時才有非零數字）</span>
+  </div>
+</div>
 
+<script>
+// =====================================================
 <script>
 // =====================================================
 // Supabase 連線設定 —— 請填入你自己的專案資訊
