@@ -507,6 +507,55 @@ def compute_global_factors(stock_day, price_history):
     return rows
 
 
+REBOUND_DROP_THRESHOLD_PCT = -7.0   # 短線急殺門檻（今日跌幅要低於這個值）
+REBOUND_VOL_RATIO_THRESHOLD = 2.0   # 明顯放量門檻（今量至少是20日均量的這個倍數）
+
+
+def compute_rebound_candidates(stock_day, volume_history):
+    """挑出「超賣反彈候選」：短線急殺到極端、且同時爆量的股票，跟一般「重挫=純風險」
+    的思路相反——無量陰跌代表恐慌賣壓可能還沒結束，但爆量重挫比較可能是「恐慌性
+    出清 + 有人趁機承接」，短線容易出現技術性反彈。這份名單刻意跟 risk_scores
+    分開、獨立存在，兩者不衝突：一檔股票可以同時被標記「風險：跌停預警」跟
+    「反彈候選觀察」，這是同一件事的兩個角度，不是互斥的判斷。
+
+    必要條件（兩個都要成立才會列入）：
+      1. 今日跌幅 <= REBOUND_DROP_THRESHOLD_PCT（短線急殺）
+      2. 量比（今量 ÷ 20日均量）>= REBOUND_VOL_RATIO_THRESHOLD（明顯放量）
+    量比資料不足（歷史天數太少，無法確定是否真的放量）時直接排除，不拿不確定
+    的資料硬湊進候選名單，避免把「量能正常但剛好資料不足」的股票誤判成反彈候選。
+    """
+    rows = []
+    for code, sd in stock_day.items():
+        close, high, low, vol = sd["close"], sd["high"], sd["low"], sd["volume"]
+        if close <= 0:
+            continue
+        chg_pct = (sd["change"] / (close - sd["change"]) * 100) if (close - sd["change"]) else 0
+        if chg_pct > REBOUND_DROP_THRESHOLD_PCT:
+            continue
+        vol_ratio = compute_vol_ratio(vol, volume_history.get(code, []))
+        if vol_ratio is None or vol_ratio < REBOUND_VOL_RATIO_THRESHOLD:
+            continue
+
+        # 收盤價在當日高低區間的位置：偏高代表盤中重挫、但收盤前有承接力道拉回不少，
+        # 反彈訊號比較強；偏低代表一路殺到收盤，反彈訊號比較弱。純參考欄位，
+        # 不影響是否入選這份名單，只是給你判斷時多一個角度。
+        close_position_pct = round((close - low) / (high - low) * 100, 1) if high > low else 50.0
+
+        rows.append({
+            "code": code,
+            "name": sd["name"],
+            "trade_date": TODAY,
+            "close": close,
+            "chg_pct": round(chg_pct, 2),
+            "vol_ratio_20": vol_ratio,
+            "close_position_pct": close_position_pct,
+            "note": f"當日跌幅 {chg_pct:.2f}%，量比 {vol_ratio:.2f} 倍，短線急殺放量觀察",
+        })
+
+    rows.sort(key=lambda r: r["vol_ratio_20"], reverse=True)
+    return rows
+
+
 def compute_liquidity_scores(stock_day, volume_history, min_days=3, risk_threshold_pct=50.0):
     """交易性風險 / 流動性：算「100張（10萬股）這筆單量，佔該股平均每日成交量的百分比」，
     比例越高代表流動性越差（一筆不大的單就可能吃掉一整天的量，賣的時候容易砸自己的價）。
@@ -1254,6 +1303,10 @@ def main():
     liquidity_rows = compute_liquidity_scores(stock_day, volume_history)
     print(f"  產出 {len(liquidity_rows)} 筆（比例達門檻者）")
 
+    print("計算超賣反彈候選...")
+    rebound_rows = compute_rebound_candidates(stock_day, volume_history)
+    print(f"  產出 {len(rebound_rows)} 筆（短線急殺+爆量者）")
+
     # 個股每日快照（給歷史查詢用，可選）
     daily_rows = []
     for code, sd in stock_day.items():
@@ -1277,6 +1330,7 @@ def main():
     supabase_upsert("risk_scores", risk_rows, "code,trade_date")
     supabase_upsert("global_factors", global_rows, "factor_code,trade_date")
     supabase_upsert("liquidity_scores", liquidity_rows, "code,trade_date")
+    supabase_upsert("rebound_candidates", rebound_rows, "code,trade_date")
 
     # 回測必須排在 stock_daily 寫入「之後」才算——回測驗證「昨天的推薦」用的是
     # 「今天的開盤價」，而今天的開盤價要等上面 stock_daily 那行 upsert 完成後，
