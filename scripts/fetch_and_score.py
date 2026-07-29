@@ -479,13 +479,13 @@ def fetch_pe_pb():
 #
 # 【訊號分數 net_signal】（v2：新增財務底色 / 營收動能 / 主升段 三個維度）
 #   +1  法人（三大合計）買超股數 > 0
-#   +1  法人買超股數 > 該股 20 日均量的 5%（買超強度夠大）
+#   +1  法人買超股數 > 該股 20 日均量的 5%（買超強度夠大；資料不足20天時fallback用今日成交量當基準）
 #   +1  今日漲跌 > 0 且成交量 > 昨日（價量齊揚，此簡化版用「今日量>0」近似）
 #   +1  財務底色佳：本益比介於 0~25（有獲利、不過度昂貴）且殖利率 > 1.5% 且股價淨值比 0~4
 #   +1  營收動能加速：最新月營收年增率 > 20%
 #   +1  主升段確認：站上上揚的20日均線、且20MA在60MA之上（需資料庫累積 ≥20 個交易日才會判斷，不足時不加分也不扣分）
 #   -1  法人賣超股數 > 0
-#   -1  法人賣超股數 > 該股 20 日均量的 5%
+#   -1  法人賣超股數 > 該股 20 日均量的 5%（同上，資料不足時fallback用今日成交量）
 #   -1  今日跌幅 > 5%（單日重挫）
 #   最終 recommendation 依 net_signal 對照（門檻值沒變，但因為新增了三個正向維度，
 #   理論上 strong-bull 的檔數會比 v1 版本多一些，這是預期中的行為，門檻值可依實際回測再調）：
@@ -528,10 +528,10 @@ def fetch_pe_pb():
 # 這些門檻值都寫在下面常數區，方便你之後調整。
 # --------------------------------------------------------------------------
 
-def compute_vol_ratio(current_volume, history_for_code, min_days=3, lookback=20):
-    """算「量比」：今日成交量 ÷ 近期（最多 lookback 天）平均成交量。
+def compute_avg_volume(history_for_code, min_days=3, lookback=20):
+    """算近期（最多 lookback 天）平均成交量。
     history_for_code: [(date_str, volume), ...] 由舊到新排序（不含今天）
-    資料不足 min_days 天時回傳 None（不瞎猜，讓呼叫端自己決定要 fallback 成中性值還是跳過該規則）
+    資料不足 min_days 天時回傳 None（不瞎猜，讓呼叫端自己決定要 fallback 成什麼）
     """
     recent = history_for_code[-lookback:]
     volumes = [v for _, v in recent if v > 0]
@@ -539,6 +539,17 @@ def compute_vol_ratio(current_volume, history_for_code, min_days=3, lookback=20)
         return None
     avg_volume = sum(volumes) / len(volumes)
     if avg_volume <= 0:
+        return None
+    return avg_volume
+
+
+def compute_vol_ratio(current_volume, history_for_code, min_days=3, lookback=20):
+    """算「量比」：今日成交量 ÷ 近期（最多 lookback 天）平均成交量。
+    history_for_code: [(date_str, volume), ...] 由舊到新排序（不含今天）
+    資料不足 min_days 天時回傳 None（不瞎猜，讓呼叫端自己決定要 fallback 成中性值還是跳過該規則）
+    """
+    avg_volume = compute_avg_volume(history_for_code, min_days, lookback)
+    if avg_volume is None:
         return None
     return round(current_volume / avg_volume, 2)
 
@@ -699,7 +710,7 @@ def recommendation_for(net_signal):
     return "avoid", "🚫 避開"
 
 
-def compute_signal_scores(stock_day, institutional, pe_pb, revenue, price_history):
+def compute_signal_scores(stock_day, institutional, pe_pb, revenue, price_history, volume_history):
     rows = []
     for code, sd in stock_day.items():
         inst = institutional.get(code, {})
@@ -717,7 +728,13 @@ def compute_signal_scores(stock_day, institutional, pe_pb, revenue, price_histor
             net_signal -= 1
             bear_tags.append("法人賣超")
 
-        vol_base = max(sd["volume"], 1)
+        # 買賣超強度判斷：跟 SCORING RULES 文件寫的一致，用「20日均量」當基準，
+        # 不是今天的成交量——今天的量本身可能就是因為法人大買/大賣才變大的，
+        # 拿當天的量當分母等於用「果」去衡量「因」，每天基準忽大忽小，會讓真正
+        # 顯著的買超強度訊號在爆量日被錯誤稀釋、漏掉。
+        # 資料不足（歷史天數太少）時 fallback 回今日成交量，至少比完全跳過這條規則合理。
+        avg_vol_20 = compute_avg_volume(volume_history.get(code, []))
+        vol_base = avg_vol_20 if avg_vol_20 is not None else max(sd["volume"], 1)
         if inst_net > 0 and abs(inst_net) > vol_base * 0.05:
             net_signal += 1
             bull_tags.append("買超強度大")
@@ -944,7 +961,7 @@ def main():
         sys.exit(1)
 
     print("計算訊號分數...")
-    signal_rows = compute_signal_scores(stock_day, institutional, pe_pb, revenue, price_history)
+    signal_rows = compute_signal_scores(stock_day, institutional, pe_pb, revenue, price_history, volume_history)
     print(f"  產出 {len(signal_rows)} 筆")
 
     print("計算爆發前兆分數...")
