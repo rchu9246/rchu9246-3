@@ -23,7 +23,7 @@ import json
 import math
 import statistics
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 import urllib.request
 import urllib.error
 
@@ -305,6 +305,32 @@ def fetch_taiex_index():
     return None
 
 
+def fetch_recent_explosion_confirms(lookback_days=10):
+    """從 explosion_scores 表撈近期（約 lookback_days 個交易日內）曾經是「爆發確認」
+    的股票，及當時記錄的 20 日箱頂價格，用來判斷今天是不是處在「爆發後回測」階段。
+
+    因為週末/國定假日不會有排程紀錄（is_weekend() 防呆擋掉了週末），這裡用日曆天數
+    做篩選時刻意留寬鬆一點的緩衝（乘 1.6 倍再加 3 天），確保涵蓋到週末造成的日期
+    跳號，不會因為篩選範圍抓太緊而漏掉真正在 lookback_days 個交易日內的資料。
+    每檔股票只保留「最近一次」出現 confirm 狀態的那筆（不受篩選範圍內出現幾次影響）。
+    """
+    cutoff_date = (date.today() - timedelta(days=int(lookback_days * 1.6) + 3)).isoformat()
+    rows = supabase_select(
+        "explosion_scores",
+        f"select=code,trade_date,box_top_20d&status=eq.confirm&trade_date=gte.{cutoff_date}&order=trade_date.desc",
+    )
+    out = {}
+    for r in rows:
+        code = r.get("code")
+        if code in out:
+            continue  # 已經有更新的那筆了（因為 order=trade_date.desc，第一筆就是最新的）
+        out[code] = {
+            "trade_date": r.get("trade_date"),
+            "box_top_20d": safe_float(r.get("box_top_20d")),
+        }
+    return out
+
+
 def fetch_taiex_history():
     """從 Supabase 撈 TAIEX 大盤指數的歷史收盤值，用來算日漲跌%與5/20/60日漲跌%。
 
@@ -561,6 +587,9 @@ def fetch_pe_pb():
 #   status：
 #     score >= 80          → confirm 爆發確認
 #     60 <= score < 80      → pre 爆發前兆
+#     score < 60，但近10個交易日內曾經是confirm、且今日收盤價仍守在當初box_top_20d之上
+#                           → retest 爆發後回測（量能退溫、股價拉回測試前壓力，
+#                             尚未跌破支撐；跌破的話視為突破失敗，不列入雷達）
 #     其餘                  → 不列入雷達
 #
 # 【風險分數 risk_score，0-100】
@@ -884,7 +913,7 @@ def compute_signal_scores(stock_day, institutional, pe_pb, revenue, price_histor
     return rows
 
 
-def compute_explosion_scores(stock_day, volume_history, price_history):
+def compute_explosion_scores(stock_day, volume_history, price_history, recent_confirms):
     rows = []
     for code, sd in stock_day.items():
         close, high, low, vol = sd["close"], sd["high"], sd["low"], sd["volume"]
@@ -923,7 +952,16 @@ def compute_explosion_scores(stock_day, volume_history, price_history):
         elif score >= EXPLOSION_PRE_SCORE:
             status, status_label, stage = "pre", "爆發前兆", "收斂醞釀"
         else:
-            continue
+            # 今天分數沒到門檻，但如果這檔股票在最近（約10個交易日內）曾經放量突破過，
+            # 而且今天收盤價還守在當初那次突破的20日箱頂之上（沒有真的跌破支撐），
+            # 就標記成「爆發後回測」，而不是直接不列入雷達——這代表突破後量能退溫、
+            # 股價拉回測試前壓力（現在變支撐），如果撐得住通常是續漲的觀察名單，
+            # 跟「假突破後直接跌破、完全不值得追蹤」的情況要分開看。
+            prior_confirm = recent_confirms.get(code)
+            if prior_confirm and prior_confirm.get("box_top_20d") and close > prior_confirm["box_top_20d"]:
+                status, status_label, stage = "retest", "爆發後回測", "突破後回測"
+            else:
+                continue
 
         # 均線收斂度 / 布林通道位置：目前只是「算出真實數字寫進欄位」，還沒納入
         # score 的計分公式（跟 vol_z60 剛補上真數字時的做法一致），資料不足時回傳 None，
@@ -1075,8 +1113,9 @@ def main():
     print(f"  產出 {len(signal_rows)} 筆")
 
     print("計算爆發前兆分數...")
-    explosion_rows = compute_explosion_scores(stock_day, volume_history, price_history)
-    print(f"  產出 {len(explosion_rows)} 筆（分數達門檻者）")
+    recent_confirms = fetch_recent_explosion_confirms()
+    explosion_rows = compute_explosion_scores(stock_day, volume_history, price_history, recent_confirms)
+    print(f"  產出 {len(explosion_rows)} 筆（分數達門檻者，含爆發後回測）")
 
     print("計算風險分數...")
     risk_rows = compute_risk_scores(stock_day, institutional, volume_history, institutional_history)
