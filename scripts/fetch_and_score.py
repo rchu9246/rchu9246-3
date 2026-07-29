@@ -346,6 +346,34 @@ def fetch_backtest_raw_data(lookback_days):
     return signal_by_date, price_by_date
 
 
+def fetch_calibration_raw_data():
+    """長期校準統計需要的資料，結構跟 fetch_backtest_raw_data 一樣，但用途不同：
+      (1) signal_scores 全部歷史推薦名單
+      (2) stock_daily 全部歷史收盤價（不需要開盤價，這裡用收盤比對）
+    跟隔日開盤回測不同，這裡刻意不限日期範圍——收盤價資料本來就一直都在存，
+    可以直接拿全部歷史來算，不用像開盤價那樣等新資料重新累積。
+    """
+    signal_rows = supabase_select(
+        "signal_scores",
+        "select=code,trade_date,recommendation&order=trade_date.desc",
+    )
+    signal_by_date = {}
+    for r in signal_rows:
+        d = r.get("trade_date")
+        signal_by_date.setdefault(d, []).append((r.get("code"), r.get("recommendation")))
+
+    price_rows = supabase_select(
+        "stock_daily",
+        "select=code,trade_date,close&order=trade_date.desc",
+    )
+    price_by_date = {}
+    for r in price_rows:
+        d = r.get("trade_date")
+        code = r.get("code")
+        price_by_date.setdefault(d, {})[code] = safe_float(r.get("close"))
+    return signal_by_date, price_by_date
+
+
 def fetch_recent_explosion_confirms(lookback_days=10):
     """從 explosion_scores 表撈近期（約 lookback_days 個交易日內）曾經是「爆發確認」
     的股票，及當時記錄的 20 日箱頂價格，用來判斷今天是不是處在「爆發後回測」階段。
@@ -971,6 +999,82 @@ def compute_backtest_stats(lookback_days=BACKTEST_LOOKBACK_DAYS):
     return rows
 
 
+CALIBRATION_MIN_SAMPLE = 20        # 樣本數低於這個值，判讀為「樣本不足」不下結論
+CALIBRATION_STRONG_THRESHOLD = 60.0  # 命中率達這個值以上，判讀為「順向有效」
+CALIBRATION_WEAK_THRESHOLD = 45.0    # 命中率低於這個值，判讀為「反向，值得留意」
+
+
+def calibration_verdict(total, win_rate):
+    """把命中率轉成一句話的質化判讀，不用自己解讀百分比數字。
+    45~60% 之間視為接近丟硬幣、沒有統計優勢，跟命中率過低（反向）分開處理，
+    因為「常常錯」跟「沒有比亂猜準」是兩件不同的事，值得分開標示。
+    """
+    if total < CALIBRATION_MIN_SAMPLE or win_rate is None:
+        return "樣本不足，尚待觀察"
+    if win_rate >= CALIBRATION_STRONG_THRESHOLD:
+        return "順向有效"
+    if win_rate <= CALIBRATION_WEAK_THRESHOLD:
+        return "反向，值得留意"
+    return "無優勢，降權觀察"
+
+
+def compute_calibration_stats():
+    """算「長期校準統計」：用「隔日收盤 vs 前一天收盤」驗證推薦方向對不對，樣本
+    抓全部歷史（不像隔日開盤回測限定滾動最近幾天），並附上質化判讀標籤，方便一眼
+    看出這個分類的訊號整體「有沒有用」，不用自己去解讀百分比數字。
+
+    跟 compute_backtest_stats() 的差異：
+      - 比對基準：這裡用「收盤」，回測用「開盤」
+      - 樣本範圍：這裡用「全部歷史」，回測用「滾動最近 N 天」
+      - 能不能回溯：這裡可以（收盤價本來就一直都有存），回測不行（開盤價這次才開始存）
+    """
+    signal_by_date, price_by_date = fetch_calibration_raw_data()
+    trade_dates = sorted(price_by_date.keys())
+
+    evaluable_dates = []
+    for i, d in enumerate(trade_dates[:-1]):
+        next_d = trade_dates[i + 1]
+        if d in signal_by_date:
+            evaluable_dates.append((d, next_d))
+    # 不像回測那樣做 [-lookback_days:] 截斷，這裡刻意保留全部可驗證的基準日
+
+    stats = {key: {"total": 0, "success": 0} for key in BACKTEST_CATEGORIES}
+    days_with_data = set()
+
+    for d, next_d in evaluable_dates:
+        recs = signal_by_date.get(d, [])
+        d_prices = price_by_date.get(d, {})
+        next_prices = price_by_date.get(next_d, {})
+        for code, recommendation in recs:
+            close_d = d_prices.get(code)
+            close_next = next_prices.get(code)
+            if not close_d or not close_next:
+                continue
+            days_with_data.add(d)
+            pct_change = (close_next - close_d) / close_d * 100
+            for key, (match_fn, direction) in BACKTEST_CATEGORIES.items():
+                if not match_fn(recommendation):
+                    continue
+                stats[key]["total"] += 1
+                success = (pct_change > 0) if direction == "up" else (pct_change < 0)
+                if success:
+                    stats[key]["success"] += 1
+
+    rows = []
+    for key, s in stats.items():
+        win_rate = round(s["success"] / s["total"] * 100, 1) if s["total"] > 0 else None
+        rows.append({
+            "trade_date": TODAY,
+            "category": key,
+            "sample_dates": len(days_with_data),
+            "total_count": s["total"],
+            "success_count": s["success"],
+            "win_rate": win_rate,
+            "verdict": calibration_verdict(s["total"], win_rate),
+        })
+    return rows
+
+
 def recommendation_for(net_signal):
     for threshold, rec, label in SIGNAL_NET_TO_REC:
         if net_signal >= threshold:
@@ -1345,6 +1449,19 @@ def main():
           f"部署初期天數少是因為舊資料沒有開盤價可比對，不是bug）")
     print(f"  多頭候選整體(bull_all)這次比對了 {bull_all_total} 檔次，可用來判斷樣本量是否足夠參考")
     supabase_upsert("backtest_stats", backtest_rows, "trade_date,category")
+
+    # 長期校準統計也要排在 stock_daily 寫入之後，理由跟隔日開盤回測一樣：需要
+    # 今天剛寫入的收盤價，才能驗證昨天的推薦。這裡用收盤價、樣本抓全部歷史，
+    # 不像回測那樣受限於「開盤價這次才開始存」，理論上樣本量會比回測大很多。
+    print("計算長期校準統計...")
+    calibration_rows = compute_calibration_stats()
+    calib_sample_dates = calibration_rows[0]["sample_dates"] if calibration_rows else 0
+    calib_bull_all = next((r for r in calibration_rows if r["category"] == "bull_all"), None)
+    print(f"  樣本涵蓋 {calib_sample_dates} 個交易日")
+    if calib_bull_all:
+        print(f"  多頭候選整體(bull_all)：{calib_bull_all['total_count']} 檔次，"
+              f"命中率 {calib_bull_all['win_rate']}，判讀：{calib_bull_all['verdict']}")
+    supabase_upsert("calibration_stats", calibration_rows, "trade_date,category")
 
     status_row = [{
         "id": 1,
