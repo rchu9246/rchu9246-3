@@ -197,6 +197,13 @@ def fetch_institutional_t86():
     回傳格式是 {"fields": [...欄位名...], "data": [[...每列資料...], ...]}，
     不是一般的物件陣列，所以要用欄位名稱去對應每一欄的位置（index），
     這樣即使 TWSE 之後調整欄位順序，只要欄位名稱關鍵字沒變就還抓得到。
+
+    回傳：(out, status, detail)
+      out    : {code: {...}} 抓到的法人買賣超資料，失敗時為 {}
+      status : "ok" | "network_error" | "no_data_published" | "format_changed"
+               寫進 fetch_status 表，讓 dashboard 分辨「今天為什麼沒有法人資料」，
+               而不是每次失敗都長得一樣、事後只能翻 log 猜原因。
+      detail : 給人看的補充說明（錯誤訊息 / TWSE 回傳的 stat 值 / 欄位清單），成功時為 None
     """
     date_str = TODAY.replace("-", "")
     url = f"https://www.twse.com.tw/fund/T86?response=json&date={date_str}&selectType=ALLBUT0999"
@@ -209,13 +216,13 @@ def fetch_institutional_t86():
         # 30秒 + 重試1次是在「多一次機會抓到真資料」跟「不要每天多花太多時間等一個不保證成功的請求」之間取平衡
         data = http_get_json(url, timeout=30, retries=1, referer="https://www.twse.com.tw/zh/page/trading/fund/T86.html")
     except Exception as e:
-        print(f"[WARN] 三大法人資料抓取失敗：{e}，本次僅用價量資料計算")
-        return {}
+        print(f"[WARN] 三大法人資料抓取失敗（網路/逾時）：{e}，本次僅用價量資料計算")
+        return {}, "network_error", str(e)
 
     if not isinstance(data, dict) or data.get("stat") != "OK":
         stat = data.get("stat") if isinstance(data, dict) else "未知格式"
         print(f"[WARN] 三大法人資料狀態異常（{stat}），可能是非交易日或當日資料尚未公布，本次僅用價量資料計算")
-        return {}
+        return {}, "no_data_published", str(stat)
 
     fields = data.get("fields", [])
     rows = data.get("data", [])
@@ -237,7 +244,7 @@ def fetch_institutional_t86():
 
     if idx_code is None:
         print(f"[WARN] 三大法人資料欄位對不上（找不到「證券代號」欄），目前欄位：{fields}")
-        return {}
+        return {}, "format_changed", f"欄位：{fields}"
 
     out = {}
     for row in rows:
@@ -253,7 +260,7 @@ def fetch_institutional_t86():
             "dealer_net": dealer_net,
             "institutional_net": foreign_net + trust_net + dealer_net,
         }
-    return out
+    return out, "ok", None
 
 
 def fetch_taiex_index():
@@ -759,8 +766,8 @@ def main():
     print(f"  取得 {len(stock_day)} 檔")
 
     print("抓取三大法人買賣超 (T86)...")
-    institutional = fetch_institutional_t86()
-    print(f"  取得 {len(institutional)} 檔")
+    institutional, institutional_status, institutional_detail = fetch_institutional_t86()
+    print(f"  取得 {len(institutional)} 檔（狀態：{institutional_status}）")
 
     print("抓取本益比/殖利率/淨值比 (BWIBBU_ALL)...")
     pe_pb = fetch_pe_pb()
@@ -825,9 +832,12 @@ def main():
     status_row = [{
         "id": 1,
         "last_sync_at": datetime.now(timezone.utc).isoformat(),
-        "confidence_score": 90,
-        "status_note": "ok",
+        "confidence_score": 90 if institutional_status == "ok" else 70,
+        "status_note": "ok" if institutional_status == "ok" else f"institutional_{institutional_status}",
         "total_records": len(stock_day),
+        "institutional_status": institutional_status,
+        "institutional_count": len(institutional),
+        "institutional_detail": institutional_detail,
     }]
     supabase_upsert("fetch_status", status_row, "id")
 
