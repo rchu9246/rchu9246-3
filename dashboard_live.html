@@ -500,8 +500,13 @@ async function sb(table, query = '') {
 }
 
 // 取「最新交易日」的資料（每張表都用 order + limit 抓最新日期那批）
-async function sbLatest(table, orderCol = 'trade_date', limit = 500) {
-  return sb(table, `order=${orderCol}.desc,composite_score.desc.nullslast&limit=${limit}`);
+// extraOrder：同一天內用來排序的第二個欄位（例如 signal_scores 用 composite_score）。
+// 不是每張表都有這個欄位（例如 stock_daily 就沒有 composite_score），
+// 所以改成可選參數，呼叫端沒帶的話就不會塞進 order 字串，避免 PostgREST 因為
+// 排序欄位不存在而回 400（之前 loadInstitutionalData 查 stock_daily 就是踩到這個）。
+async function sbLatest(table, orderCol = 'trade_date', limit = 500, extraOrder = '') {
+  const orderClause = extraOrder ? `${orderCol}.desc,${extraOrder}` : `${orderCol}.desc`;
+  return sb(table, `order=${orderClause}&limit=${limit}`);
 }
 
 // ---------- Tabs ----------
@@ -534,12 +539,20 @@ function fmtPct(v){
 }
 function fmtNum(v){ return `<span class="num">${v}</span>`; }
 
+// 有些欄位（vol_z60 / ma_convergence_pct / boll_position_pct 等）在資料庫歷史天數
+// 還不夠時，後端會刻意回傳 null（不硬湊假數字），這裡統一用這個函式做防呆，
+// null/undefined 時顯示「資料累積中」而不是直接對 null 呼叫 .toFixed() 讓整個渲染中斷。
+function fmtNumOrDash(v, decimals){
+  if (v === null || v === undefined) return '<span style="color:var(--sub)">資料累積中</span>';
+  return v.toFixed(decimals);
+}
+
 // ---------- Page 1: Signal Center ----------
 // 資料來源：Supabase signal_scores 表（由 scripts/fetch_and_score.py 收盤後寫入）
 let signalData = [];
 
 async function loadSignalData() {
-  const raw = await sbLatest('signal_scores', 'trade_date', 500);
+  const raw = await sbLatest('signal_scores', 'trade_date', 500, 'composite_score.desc.nullslast');
   signalData = raw.map(r => ({
     code: r.code, name: r.name, close: r.close, chg: r.chg_pct,
     net: r.net_signal, rec: r.recommendation, recTxt: r.recommendation_label,
@@ -659,10 +672,10 @@ function renderExplosion(){
       <td>${fmtPct(r.chgDay)}</td>
       <td>${fmtPct(r.brk)}</td>
       <td class="num">${r.box.toFixed(2)}</td>
-      <td class="num">${r.vol20.toFixed(2)}</td>
-      <td class="num">${r.volz.toFixed(2)}</td>
-      <td class="num">${r.ma.toFixed(1)}</td>
-      <td class="num">${r.boll}</td>
+      <td class="num">${fmtNumOrDash(r.vol20, 2)}</td>
+      <td class="num">${fmtNumOrDash(r.volz, 2)}</td>
+      <td class="num">${fmtNumOrDash(r.ma, 1)}</td>
+      <td class="num">${fmtNumOrDash(r.boll, 1)}</td>
     `;
     body.appendChild(tr);
   });
@@ -715,7 +728,7 @@ function renderRisk(){
       <td>${r.action}</td>
       <td class="num">${r.close.toFixed(2)}</td>
       <td>${fmtPct(r.chg)}</td>
-      <td class="num">${r.vol||'-'}</td>
+      <td class="num">${fmtNumOrDash(r.vol, 2)}</td>
       <td class="num">${r.atr||'-'}</td>
       <td class="num">${r.sell}</td>
       <td class="num">${r.liq}</td>
