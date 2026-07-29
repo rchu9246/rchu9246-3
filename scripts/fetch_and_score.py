@@ -133,25 +133,34 @@ def fetch_monthly_revenue():
     return out
 
 
-def fetch_price_history(codes, days=60):
-    """從 Supabase 撈每檔股票近期收盤價歷史，用來算均線趨勢（主升段判斷用）
-    只在資料庫已經累積足夠天數時才有意義，天數不夠時回傳的歷史會很短，
-    compute 那邊會自動跳過判斷。
+def fetch_price_and_volume_history():
+    """從 Supabase 撈每檔股票近期收盤價 + 成交量歷史，一次查詢同時取出兩者。
+
+    原本這是兩個獨立函式（fetch_price_history / fetch_volume_history），各自對
+    stock_daily 整張表分頁查詢一次——但兩者查的是同一批列，只是選的欄位不同，
+    等於同一份資料被完整抓了兩遍。隨著資料庫累積的交易日變多，這張表會越來越大，
+    重複查詢的成本也跟著變大，所以合併成一次查詢、一次分頁，各自組成獨立的
+    {code: [(date, value), ...]} 結構回傳，避免收盤價/成交量的 tuple 順序搞混。
     """
     rows = supabase_select(
         "stock_daily",
-        "select=code,trade_date,close&order=trade_date.desc",
+        "select=code,trade_date,close,volume&order=trade_date.desc",
     )
-    history = {}
+    price_history = {}
+    volume_history = {}
     for r in rows:
         code = r.get("code")
-        if code not in history:
-            history[code] = []
-        history[code].append((r.get("trade_date"), safe_float(r.get("close"))))
+        trade_date = r.get("trade_date")
+        if code not in price_history:
+            price_history[code] = []
+            volume_history[code] = []
+        price_history[code].append((trade_date, safe_float(r.get("close"))))
+        volume_history[code].append((trade_date, safe_float(r.get("volume"))))
     # 依日期由舊到新排序
-    for code in history:
-        history[code].sort(key=lambda x: x[0])
-    return history
+    for code in price_history:
+        price_history[code].sort(key=lambda x: x[0])
+        volume_history[code].sort(key=lambda x: x[0])
+    return price_history, volume_history
 
 
 def safe_float(v, default=0.0):
@@ -374,26 +383,6 @@ def compute_global_factors(stock_day, price_history):
     return rows
 
 
-def fetch_volume_history():
-    """從 Supabase 撈每檔股票近期成交量歷史，用來算 20 日均量（交易性風險/流動性判斷用）。
-    跟 fetch_price_history 分開寫成獨立函式，避免共用同一份資料結構時
-    不小心把「收盤價」跟「成交量」的 tuple 順序搞混。
-    """
-    rows = supabase_select(
-        "stock_daily",
-        "select=code,trade_date,volume&order=trade_date.desc",
-    )
-    history = {}
-    for r in rows:
-        code = r.get("code")
-        if code not in history:
-            history[code] = []
-        history[code].append((r.get("trade_date"), safe_float(r.get("volume"))))
-    for code in history:
-        history[code].sort(key=lambda x: x[0])
-    return history
-
-
 def compute_liquidity_scores(stock_day, volume_history, min_days=3, risk_threshold_pct=50.0):
     """交易性風險 / 流動性：算「100張（10萬股）這筆單量，佔該股平均每日成交量的百分比」，
     比例越高代表流動性越差（一筆不大的單就可能吃掉一整天的量，賣的時候容易砸自己的價）。
@@ -505,6 +494,10 @@ def fetch_pe_pb():
 #         → 看「相對這檔股票平常的量能波動幅度，今天算不算異常」，資料不足時該次不貢獻分數（視為0）
 #     單日漲幅貢獻 0-30 分：min(max(漲幅,0), 10) / 10 * 30
 #     收盤價站上今日均價（強勢收盤）貢獻 0-30 分：(close - low) / (high - low) * 30（若 high=low 則給 15）
+#   附加參考欄位（目前只是算出真實數字寫進輸出，尚未納入 score 計分公式）：
+#     ma_convergence_pct：均線收斂度，(可用均線中最高-最低)/現價*100，數字越小代表均線越收斂
+#     boll_position_pct：布林通道位置（%B），現價落在布林通道的百分比位置，0=貼下軌、100=貼上軌
+#     兩者資料不足時皆回傳 None，不是每天都會有值
 #   status：
 #     score >= 80          → confirm 爆發確認
 #     60 <= score < 80      → pre 爆發前兆
@@ -557,6 +550,51 @@ def compute_vol_zscore(current_volume, history_for_code, min_days=10, lookback=6
     if stdev_volume == 0:
         return None
     return round((current_volume - mean_volume) / stdev_volume, 2)
+
+
+def compute_ma_convergence_pct(current_close, history_for_code, periods=(5, 10, 20)):
+    """算「均線收斂度」：抓資料夠的短中期均線（5/10/20日，資料不足的天期就跳過，只用抓得到的），
+    看這些均線彼此貼近的程度——數值越小代表均線收斂（常見的「醞釀突破」訊號之一），
+    數值越大代表均線發散（多空排列分明）。
+
+    算法：(可用均線中最高的 - 最低的) / 現價 * 100
+    至少要能算出兩條均線才有比較意義，不足時回傳 None（不硬湊）。
+    """
+    if current_close <= 0:
+        return None
+    closes = [c for _, c in history_for_code] + [current_close]
+    ma_values = [sum(closes[-p:]) / p for p in periods if len(closes) >= p]
+    if len(ma_values) < 2:
+        return None
+    spread = max(ma_values) - min(ma_values)
+    return round(spread / current_close * 100, 2)
+
+
+def compute_boll_position_pct(current_close, history_for_code, period=20, k=2, min_days=10):
+    """算「布林通道位置」（%B）：現價落在布林通道的哪個位置。
+    0% = 貼著下軌，50% = 貼著中軌（均線），100% = 貼著上軌；可以超過 0~100，代表股價已經突破軌道。
+
+    標準布林通道用 20 日，但資料庫還在累積階段時 20 天常常不夠，所以退而求其次：
+    只要有 min_days（預設10天）以上資料就先算，天數不足 period 時就用「目前有的天數」
+    當觀察窗，等於是縮短版的布林通道，僅供參考，天數不足 min_days 時直接回傳 None。
+    """
+    if current_close <= 0:
+        return None
+    closes = [c for _, c in history_for_code] + [current_close]
+    if len(closes) < min_days:
+        return None
+    window = closes[-period:] if len(closes) >= period else closes
+    if len(window) < 2:
+        return None
+    mean_close = statistics.mean(window)
+    stdev_close = statistics.stdev(window)
+    if stdev_close == 0:
+        return None
+    upper = mean_close + k * stdev_close
+    lower = mean_close - k * stdev_close
+    if upper == lower:
+        return None
+    return round((current_close - lower) / (upper - lower) * 100, 2)
 
 
 def compute_ma_trend(history_for_code, min_days=20):
@@ -695,7 +733,7 @@ def compute_signal_scores(stock_day, institutional, pe_pb, revenue, price_histor
     return rows
 
 
-def compute_explosion_scores(stock_day, volume_history):
+def compute_explosion_scores(stock_day, volume_history, price_history):
     rows = []
     for code, sd in stock_day.items():
         close, high, low, vol = sd["close"], sd["high"], sd["low"], sd["volume"]
@@ -736,6 +774,12 @@ def compute_explosion_scores(stock_day, volume_history):
         else:
             continue
 
+        # 均線收斂度 / 布林通道位置：目前只是「算出真實數字寫進欄位」，還沒納入
+        # score 的計分公式（跟 vol_z60 剛補上真數字時的做法一致），資料不足時回傳 None，
+        # 不是每天都會有值，需等資料庫累積夠天數才會穩定出現
+        ma_convergence_pct = compute_ma_convergence_pct(close, price_history.get(code, []))
+        boll_position_pct = compute_boll_position_pct(close, price_history.get(code, []))
+
         rows.append({
             "code": code,
             "name": sd["name"],
@@ -751,8 +795,8 @@ def compute_explosion_scores(stock_day, volume_history):
             "box_top_20d": high,
             "vol_ratio_20": vol_ratio_20,
             "vol_z60": vol_z60,
-            "ma_convergence_pct": 0,
-            "boll_position_pct": 0,
+            "ma_convergence_pct": ma_convergence_pct,
+            "boll_position_pct": boll_position_pct,
         })
     return rows
 
@@ -845,13 +889,10 @@ def main():
     revenue = fetch_monthly_revenue()
     print(f"  取得 {len(revenue)} 檔")
 
-    print("讀取歷史股價（算主升段用）...")
-    price_history = fetch_price_history(stock_day.keys() if stock_day else [])
+    print("讀取歷史股價與成交量（算主升段/交易性風險/流動性/爆發前兆用）...")
+    price_history, volume_history = fetch_price_and_volume_history()
     days_available = max((len(v) for v in price_history.values()), default=0)
     print(f"  目前資料庫累積約 {days_available} 個交易日歷史（需要 ≥20 天才會開始判斷主升段）")
-
-    print("讀取歷史成交量（算交易性風險/流動性用）...")
-    volume_history = fetch_volume_history()
 
     if not stock_day:
         print("[FATAL] 未取得任何個股資料，中止本次執行（可能是非交易日或端點異動）")
@@ -862,7 +903,7 @@ def main():
     print(f"  產出 {len(signal_rows)} 筆")
 
     print("計算爆發前兆分數...")
-    explosion_rows = compute_explosion_scores(stock_day, volume_history)
+    explosion_rows = compute_explosion_scores(stock_day, volume_history, price_history)
     print(f"  產出 {len(explosion_rows)} 筆（分數達門檻者）")
 
     print("計算風險分數...")
