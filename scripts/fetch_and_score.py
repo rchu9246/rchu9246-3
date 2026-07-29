@@ -300,6 +300,22 @@ def fetch_taiex_index():
     return None
 
 
+def fetch_taiex_history():
+    """從 Supabase 撈 TAIEX 大盤指數的歷史收盤值，用來算日漲跌%與5/20/60日漲跌%。
+
+    global_factors 表每次執行都會 upsert 一筆 factor_code='TAIEX'、trade_date=今天
+    的資料，所以查詢這張表過去的紀錄，就能重建出 TAIEX 自己的歷史序列，
+    不需要另外開新表——這批資料早就存在，只是先前沒有回頭讀取利用。
+    """
+    rows = supabase_select(
+        "global_factors",
+        "select=trade_date,value&factor_code=eq.TAIEX&order=trade_date.desc",
+    )
+    hist = [(r.get("trade_date"), safe_float(r.get("value"))) for r in rows]
+    hist.sort(key=lambda x: x[0])
+    return hist
+
+
 def fetch_yahoo_quote(symbol):
     """透過 Yahoo Finance 非官方 chart API 抓國際指數/匯率報價（例如 ^SOX、TWD=X）
     這是業界廣泛使用的非官方端點，比證交所的舊版報表穩定，但仍非正式合約 API，
@@ -354,10 +370,30 @@ def compute_global_factors(stock_day, price_history):
     # 1. TAIEX 大盤指數
     taiex_close = fetch_taiex_index()
     if taiex_close is not None:
+        # taiex_hist 是「不含今天」的歷史（今天這筆要等這次執行最後 upsert 才會寫進
+        # global_factors），跟其他歷史相關函式（compute_vol_ratio等）用同一套邏輯：
+        # 今天的值當獨立參數，歷史只回推到昨天為止
+        taiex_hist = fetch_taiex_history()
+        taiex_chg_pct = None
+        if taiex_hist:
+            prev_close = taiex_hist[-1][1]
+            if prev_close:
+                taiex_chg_pct = round((taiex_close - prev_close) / prev_close * 100, 2)
+        taiex_d5 = pct_change_n_days_ago(taiex_hist + [(TODAY, taiex_close)], 5)
+        taiex_d20 = pct_change_n_days_ago(taiex_hist + [(TODAY, taiex_close)], 20)
+        taiex_d60 = pct_change_n_days_ago(taiex_hist + [(TODAY, taiex_close)], 60)
+        if taiex_chg_pct is None:
+            taiex_direction = "中性"
+        else:
+            taiex_direction = "偏多" if taiex_chg_pct > 0 else ("偏空" if taiex_chg_pct < 0 else "中性")
         rows.append({
             "factor_code": "TAIEX", "trade_date": TODAY, "category": "大盤",
-            "factor_name": "台股加權指數", "value": taiex_close, "chg_pct": None,
-            "direction": "中性", "impact_score": None, "note": "台灣證券交易所發行量加權股價指數",
+            "factor_name": "台股加權指數", "value": taiex_close, "chg_pct": taiex_chg_pct,
+            "direction": taiex_direction, "impact_score": None,
+            "note": json.dumps({
+                "d5": taiex_d5, "d20": taiex_d20, "d60": taiex_d60,
+                "note": "台灣證券交易所發行量加權股價指數",
+            }, ensure_ascii=False),
         })
 
     # 2. 國際指數/匯率（Yahoo Finance）
@@ -381,10 +417,14 @@ def compute_global_factors(stock_day, price_history):
         if not sd:
             continue
         chg_pct = (sd["change"] / (sd["close"] - sd["change"]) * 100) if (sd["close"] - sd["change"]) else 0
-        hist = price_history.get(code, [])
-        d5 = pct_change_n_days_ago(hist, 5)
-        d20 = pct_change_n_days_ago(hist, 20)
-        d60 = pct_change_n_days_ago(hist, 60)
+        # price_history 是「不含今天」的歷史，直接拿去算 d5/d20/d60 的話，closes[-1] 會是
+        # 昨天的收盤價、不是今天，等於這三個百分比都少算了今天這一天的漲跌（跟先前
+        # compute_ma_trend() 誤用歷史最後一筆當「今天」是同一類問題）。修法一樣：把
+        # 今天的收盤價當獨立資料點接在歷史後面，再算百分比。
+        hist_with_today = price_history.get(code, []) + [(TODAY, sd["close"])]
+        d5 = pct_change_n_days_ago(hist_with_today, 5)
+        d20 = pct_change_n_days_ago(hist_with_today, 20)
+        d60 = pct_change_n_days_ago(hist_with_today, 60)
         rows.append({
             "factor_code": f"ETF_{code}", "trade_date": TODAY, "category": meta["category"],
             "factor_name": meta["name"], "value": sd["close"], "chg_pct": round(chg_pct, 2),
