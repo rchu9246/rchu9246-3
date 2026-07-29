@@ -879,6 +879,13 @@ def compute_backtest_stats(lookback_days=BACKTEST_LOOKBACK_DAYS):
     evaluable_dates = evaluable_dates[-lookback_days:]  # 只取最近 lookback_days 個可驗證的基準日
 
     stats = {key: {"total": 0, "success": 0} for key in BACKTEST_CATEGORIES}
+    # days_with_data：真正「有比對到至少一筆資料」的基準日，跟 evaluable_dates 不同——
+    # evaluable_dates 只代表「那天有推薦名單、且下一個交易日的日期存在」，但下一個
+    # 交易日的 open 欄位可能是部署這個功能之前寫入的舊資料，整批是 None，比對時會
+    # 全部被跳過、貢獻不到任何 total_count。用 evaluable_dates 的天數當「樣本天數」
+    # 對外顯示，會在部署初期虛報樣本量（顯示有N天，但其實大多數天都比對不到東西），
+    # 所以另外用這個集合追蹤「真正貢獻過資料」的天數，才是對外該講的數字。
+    days_with_data = set()
 
     for d, next_d in evaluable_dates:
         recs = signal_by_date.get(d, [])
@@ -889,6 +896,7 @@ def compute_backtest_stats(lookback_days=BACKTEST_LOOKBACK_DAYS):
             open_next = next_prices.get(code, {}).get("open")
             if not close_d or open_next is None:
                 continue  # 沒有隔天開盤價可比對（停牌、或還沒累積到有 open 的資料）
+            days_with_data.add(d)
             pct_change = (open_next - close_d) / close_d * 100
             for key, (match_fn, direction) in BACKTEST_CATEGORIES.items():
                 if not match_fn(recommendation):
@@ -905,7 +913,7 @@ def compute_backtest_stats(lookback_days=BACKTEST_LOOKBACK_DAYS):
             "trade_date": TODAY,
             "category": key,
             "lookback_days": lookback_days,
-            "sample_dates": len(evaluable_dates),
+            "sample_dates": len(days_with_data),
             "total_count": s["total"],
             "success_count": s["success"],
             "win_rate": win_rate,
@@ -1268,7 +1276,11 @@ def main():
     print("計算隔日開盤回測統計...")
     backtest_rows = compute_backtest_stats()
     sample_dates = backtest_rows[0]["sample_dates"] if backtest_rows else 0
-    print(f"  樣本涵蓋 {sample_dates} 個交易日（目標 {BACKTEST_LOOKBACK_DAYS} 天，累積中屬正常）")
+    bull_all_row = next((r for r in backtest_rows if r["category"] == "bull_all"), None)
+    bull_all_total = bull_all_row["total_count"] if bull_all_row else 0
+    print(f"  真正比對到資料的天數 {sample_dates}（目標 {BACKTEST_LOOKBACK_DAYS} 天，累積中屬正常；"
+          f"部署初期天數少是因為舊資料沒有開盤價可比對，不是bug）")
+    print(f"  多頭候選整體(bull_all)這次比對了 {bull_all_total} 檔次，可用來判斷樣本量是否足夠參考")
     supabase_upsert("backtest_stats", backtest_rows, "trade_date,category")
 
     status_row = [{
