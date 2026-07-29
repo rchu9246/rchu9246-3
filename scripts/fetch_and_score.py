@@ -497,7 +497,12 @@ def fetch_pe_pb():
 #
 # 【爆發前兆分數 explosion score，0-100】
 #   以量能與突破為主：
-#     量比（今量/20日均量）貢獻 0-40 分：min(量比, 5) / 5 * 40
+#     量能維度貢獻 0-40 分，由兩個訊號加總（各自代表不同角度，都跟今日成交量有關）：
+#       量比（今量/20日均量）貢獻 0-25 分：min(量比, 5) / 5 * 25
+#         → 看「今天量是平常的幾倍」，資料不足時 fallback 用中性值 1.0 繼續參與計分
+#       量能z-score（今量偏離近60日均量幾個標準差）貢獻 0-15 分：
+#         min(max(z-score, 0), 4) / 4 * 15
+#         → 看「相對這檔股票平常的量能波動幅度，今天算不算異常」，資料不足時該次不貢獻分數（視為0）
 #     單日漲幅貢獻 0-30 分：min(max(漲幅,0), 10) / 10 * 30
 #     收盤價站上今日均價（強勢收盤）貢獻 0-30 分：(close - low) / (high - low) * 30（若 high=low 則給 15）
 #   status：
@@ -531,6 +536,27 @@ def compute_vol_ratio(current_volume, history_for_code, min_days=3, lookback=20)
     if avg_volume <= 0:
         return None
     return round(current_volume / avg_volume, 2)
+
+
+def compute_vol_zscore(current_volume, history_for_code, min_days=10, lookback=60):
+    """算「60日成交量 z-score」：今日量偏離近期（最多 lookback 天）平均量幾個標準差。
+    跟量比（vol_ratio）看的是同一件事的不同角度：量比看「倍數」，z-score 看「相對於
+    這檔股票平時波動幅度而言，今天算不算異常」——同樣是量增1倍，對成交量本來就很不穩定
+    的股票可能很正常（z-score低），對量能一向平穩的股票可能就是顯著異常（z-score高）。
+
+    history_for_code: [(date_str, volume), ...] 由舊到新排序（不含今天）
+    資料不足 min_days 天，或近期量能完全沒有波動（標準差為0，除以0會爆），都回傳 None，
+    呼叫端寫入時允許 None（欄位設計上就是可為空，代表「資料不足，本次不判斷」）。
+    """
+    recent = history_for_code[-lookback:]
+    volumes = [v for _, v in recent if v > 0]
+    if len(volumes) < min_days:
+        return None
+    mean_volume = statistics.mean(volumes)
+    stdev_volume = statistics.stdev(volumes)  # 需要至少2筆資料，上面 min_days>=10 已保證足夠
+    if stdev_volume == 0:
+        return None
+    return round((current_volume - mean_volume) / stdev_volume, 2)
 
 
 def compute_ma_trend(history_for_code, min_days=20):
@@ -579,6 +605,9 @@ RISK_INST_SELL_RATIO = 0.03     # 法人賣超佔 20 日均量比例門檻
 RISK_AMPLITUDE_PCT = 6.0        # 單日振幅門檻
 EXPLOSION_CONFIRM_SCORE = 80
 EXPLOSION_PRE_SCORE = 60
+EXPLOSION_VOL_RATIO_MAX_POINTS = 25   # 量能維度（滿分40）裡，「量比」佔的上限
+EXPLOSION_VOL_ZSCORE_MAX_POINTS = 15  # 量能維度（滿分40）裡，「z-score」佔的上限
+EXPLOSION_VOL_ZSCORE_CAP = 4.0        # z-score 超過這個值，額外分數不再往上加
 
 
 def recommendation_for(net_signal):
@@ -679,7 +708,20 @@ def compute_explosion_scores(stock_day, volume_history):
         vol_ratio_20 = compute_vol_ratio(vol, volume_history.get(code, []))
         if vol_ratio_20 is None:
             vol_ratio_20 = 1.0
-        vol_score = min(vol_ratio_20, 5) / 5 * 40
+        vol_ratio_score = min(vol_ratio_20, 5) / 5 * EXPLOSION_VOL_RATIO_MAX_POINTS
+
+        # z-score：今日量偏離該股「平常」量能幾個標準差，抓的是量比抓不到的東西——
+        # 同樣放量1倍，對量能一向穩定的股票是顯著訊號，對本來就大起大落的股票可能只是常態。
+        # 資料不足時無法判斷是否異常，fallback 用 0（不加分也不扣分），跟 vol_ratio 的
+        # fallback邏輯不同：vol_ratio資料不足時用中性值1.0繼續參與計分，z-score資料不足時
+        # 則是「這個維度本次不貢獻分數」，因為兩者資料不足的意義不同（vol_ratio只要有幾天
+        # 資料就能算平均，z-score要更多天數才能合理估計標準差，資料不足時硬算出來的z-score
+        # 反而更不可靠，不如不给分）
+        vol_z60 = compute_vol_zscore(vol, volume_history.get(code, []))
+        vol_z60_for_score = vol_z60 if vol_z60 is not None else 0.0
+        vol_zscore_score = min(max(vol_z60_for_score, 0), EXPLOSION_VOL_ZSCORE_CAP) / EXPLOSION_VOL_ZSCORE_CAP * EXPLOSION_VOL_ZSCORE_MAX_POINTS
+
+        vol_score = vol_ratio_score + vol_zscore_score
         chg_score = min(max(chg_pct, 0), 10) / 10 * 30
         if high > low:
             close_strength = (close - low) / (high - low) * 30
@@ -708,7 +750,7 @@ def compute_explosion_scores(stock_day, volume_history):
             "breakout_pct": round(chg_pct, 2),
             "box_top_20d": high,
             "vol_ratio_20": vol_ratio_20,
-            "vol_z60": 0,
+            "vol_z60": vol_z60,
             "ma_convergence_pct": 0,
             "boll_position_pct": 0,
         })
