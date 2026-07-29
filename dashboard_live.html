@@ -235,23 +235,27 @@
 <body>
 
 <div class="topbar">
-  <div class="ctrl">區間：
-    <select><option>5 日</option><option>10 日</option><option>20 日</option></select>
+  <div class="ctrl" title="尚未串接：需要資料庫存住每天的法人買賣超原始數字歷史才能算「近N日」，目前只存了當天的訊號標籤，做不到">區間（尚未串接）：
+    <select disabled><option>5 日</option><option>10 日</option><option>20 日</option></select>
   </div>
   <div class="ctrl">排序：
-    <select><option>淨買賣超張數</option><option>綜合分數</option><option>漲跌%</option></select>
+    <select id="signal-sort-select" onchange="renderSignal(currentSigFilter)">
+      <option value="composite">綜合分數</option>
+      <option value="chg">漲跌%</option>
+      <option value="net">淨訊號（代替原本的淨買賣超張數，目前沒有原始股數資料）</option>
+    </select>
   </div>
-  <div class="ctrl">Top N：<input type="number" value="30" style="width:56px;"></div>
-  <div class="ctrl">銀行：
+  <div class="ctrl">Top N：<input type="number" id="topn-input" value="30" min="1" style="width:56px;" onchange="renderSignal(currentSigFilter)"></div>
+  <div class="ctrl" title="尚未串接：證交所公開資料沒有拆分到個別公股銀行的買賣超數字，目前完全沒有這個資料源">銀行（尚未串接）：
     <div class="banks">
-      <label><input type="checkbox" checked>合作金庫</label>
-      <label><input type="checkbox" checked>土銀</label>
-      <label><input type="checkbox" checked>台銀</label>
-      <label><input type="checkbox" checked>臺企銀</label>
-      <label><input type="checkbox" checked>彰銀</label>
-      <label><input type="checkbox" checked>第一銀</label>
-      <label><input type="checkbox" checked>兆豐銀</label>
-      <label><input type="checkbox" checked>華南銀</label>
+      <label><input type="checkbox" checked disabled>合作金庫</label>
+      <label><input type="checkbox" checked disabled>土銀</label>
+      <label><input type="checkbox" checked disabled>台銀</label>
+      <label><input type="checkbox" checked disabled>臺企銀</label>
+      <label><input type="checkbox" checked disabled>彰銀</label>
+      <label><input type="checkbox" checked disabled>第一銀</label>
+      <label><input type="checkbox" checked disabled>兆豐銀</label>
+      <label><input type="checkbox" checked disabled>華南銀</label>
     </div>
   </div>
   <button class="refresh-btn" onclick="refreshData()">重新整理</button>
