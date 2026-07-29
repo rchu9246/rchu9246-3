@@ -524,7 +524,10 @@ async function loadSignalData() {
 function badgeClass(rec){
   return {'strong-bull':'strong-bull','bull':'bull','watch':'watch','pullback':'pullback','trial':'trial','neutral':'neutral','avoid':'avoid'}[rec] || 'neutral';
 }
+let currentSigFilter = 'all';
+
 function renderSignal(filter='all'){
+  currentSigFilter = filter;
   const body = document.getElementById('signal-body');
   if (signalData.length === 0) {
     body.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--sub);padding:20px;">尚無資料，請確認 Supabase 連線設定與排程是否已執行過</td></tr>';
@@ -534,7 +537,6 @@ function renderSignal(filter='all'){
     document.getElementById('cnt-conflict').textContent = '-';
     return;
   }
-  // 右上角統計數字：一律以「全部」資料為基準算，不會因為使用者切了篩選 chip 而跟著變
   document.getElementById('cnt-strong-bull').textContent = signalData.filter(r=>r.net>=3).length;
   document.getElementById('cnt-strong-bear').textContent = signalData.filter(r=>r.net<=-3).length;
   document.getElementById('cnt-conflict').textContent = signalData.filter(r=>r.bull.length>0 && r.bear.length>0).length;
@@ -545,8 +547,19 @@ function renderSignal(filter='all'){
   if(filter==='bear') rows = rows.filter(r=>r.net<=-3);
   if(filter==='conflict') rows = rows.filter(r=>r.bull.length>0 && r.bear.length>0);
   if(filter==='any') rows = rows.filter(r=>r.bull.length>0 || r.bear.length>0);
-  document.getElementById('sig-count').textContent = `${rows.length}/${signalData.length}`;
-  rows.forEach((r,i)=>{
+
+  const sortField = document.getElementById('signal-sort-select')?.value || 'composite';
+  rows = [...rows].sort((a,b) => {
+    if(sortField==='chg') return b.chg - a.chg;
+    if(sortField==='net') return b.net - a.net;
+    return b.score - a.score;
+  });
+
+  const topN = parseInt(document.getElementById('topn-input')?.value, 10) || rows.length;
+  const shownRows = rows.slice(0, topN);
+
+  document.getElementById('sig-count').textContent = `${shownRows.length}/${signalData.length}`;
+  shownRows.forEach((r,i)=>{
     const stars = '★'.repeat(r.stars);
     const tr = document.createElement('tr');
     tr.innerHTML = `
