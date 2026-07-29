@@ -967,8 +967,28 @@ def compute_risk_scores(stock_day, institutional, volume_history, institutional_
 TODAY = date.today().isoformat()
 
 
+def is_weekend(date_str):
+    """判斷傳入的日期字串（YYYY-MM-DD）是不是週六/週日"""
+    return datetime.strptime(date_str, "%Y-%m-%d").weekday() >= 5
+
+
 def main():
     print(f"=== 開始執行 {TODAY} 收盤後計算 ===")
+
+    # 台股週末不開盤，但證交所的各項端點（STOCK_DAY_ALL、MI_INDEX 等）在週末被
+    # 觸發時，常常不會回錯誤或空值，而是直接回傳「上一個交易日」的舊資料。如果照
+    # 常寫入，會產生一筆「trade_date 是週末、但數字其實是別天」的髒資料，汙染之後
+    # 算5/20/60日漲跌幅等時間序列指標的正確性（這種髒資料不會被後面「stock_day
+    # 是否為空」的檢查擋下來，因為證交所確實回了一批看似正常的資料，只是日期不對）。
+    # 這裡只擋週六日，國定假日（例如農曆年、國慶日）目前還沒有對照日曆可以判斷，
+    # 如果在國定假日手動觸發，一樣會有這個問題，之後可以考慮接台灣證交所公告的
+    # 「休市日曆」再補強。
+    if is_weekend(TODAY):
+        print(f"[SKIP] {TODAY} 是週六/週日，台股不開盤。證交所端點在非交易日常常還是會")
+        print("回傳上一個交易日的舊資料，直接寫入會產生日期跟數字對不上的髒資料，")
+        print("這次執行直接跳過、不寫入任何資料表。如果需要在假日測試程式碼本身的邏輯，")
+        print("建議另外寫測試腳本、不要透過這個正式排程腳本寫入正式的 Supabase 資料表。")
+        return
 
     print("抓取個股日成交資訊 (STOCK_DAY_ALL)...")
     try:
