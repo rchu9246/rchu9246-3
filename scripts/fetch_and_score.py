@@ -978,6 +978,73 @@ def compute_consecutive_buy_days(current_inst_net, history_for_code):
     return count
 
 
+def compute_low_divergence(current_close, current_volume, price_hist, volume_hist, lookback=20, min_days=10):
+    """算「低吸背離」：股價創新低，但當天成交量沒有跟著放大（甚至比上一次探低那天
+    的量還小），是常見的底部背離型態——代表雖然價格破底，賣壓其實在減弱（不是
+    恐慌性追殺），可能是止跌訊號。
+
+    跟「超賣反彈候選」（compute_rebound_candidates）不同：那個看的是「急殺+爆量」
+    （恐慌性出清後有人承接），這個看的是「破底+量縮」（賣壓衰竭型態），是兩種不同
+    角度的底部訊號，可能同時出現，也可能只出現一種，不衝突。
+
+    資料不足 min_days 天，或找不到有效的「上一次探低」比較基準時，回傳 False（不判斷）。
+    """
+    price_with_today = price_hist + [(TODAY, current_close)]
+    if len(price_with_today) < min_days:
+        return False
+
+    recent = price_with_today[-lookback:]
+    closes = [c for _, c in recent]
+    if current_close > min(closes):
+        return False  # 今天不是這段期間內的新低，不算破底
+
+    prior_prices = recent[:-1]  # 排除今天，找歷史上的低點當比較基準
+    if not prior_prices:
+        return False
+    prior_low_date, _ = min(prior_prices, key=lambda x: x[1])
+    vol_dict = dict(volume_hist)
+    prior_low_volume = vol_dict.get(prior_low_date)
+    if not prior_low_volume or prior_low_volume <= 0:
+        return False
+
+    return current_volume < prior_low_volume
+
+
+def compute_market_consecutive_buy_days(institutional, institutional_history):
+    """算「大盤整體」法人買超連續天數，當作「籌碼領先」的比對基準。
+
+    判斷方式：某一天如果法人淨買超的股票家數 > 淨賣超家數，就算大盤的「買超日」
+    （用家數而不是金額加總，避免被少數幾檔超大權值股的買賣金額主導整體判斷）。
+    從今天往回數，遇到不是買超日就停止，回傳連續買超日數。
+    """
+    buy_count, sell_count = {}, {}
+
+    def tally(date_str, net):
+        if net is None:
+            return
+        if net > 0:
+            buy_count[date_str] = buy_count.get(date_str, 0) + 1
+        elif net < 0:
+            sell_count[date_str] = sell_count.get(date_str, 0) + 1
+
+    trading_dates = set()
+    for hist in institutional_history.values():
+        for d, v in hist:
+            trading_dates.add(d)
+            tally(d, v)
+    trading_dates.add(TODAY)
+    for inst in institutional.values():
+        tally(TODAY, inst.get("institutional_net"))
+
+    count = 0
+    for d in sorted(trading_dates, reverse=True):
+        if buy_count.get(d, 0) > sell_count.get(d, 0):
+            count += 1
+        else:
+            break
+    return count
+
+
 def compute_ma_trend(current_close, history_for_code, min_days=20):
     """判斷是否符合「主升段確認」：站上20日均線、20日均線向上、且20MA在60MA之上
 
@@ -1202,6 +1269,9 @@ def recommendation_for(net_signal):
 
 def compute_signal_scores(stock_day, institutional, pe_pb, revenue, price_history, volume_history, institutional_history):
     rows = []
+    # 大盤整體買超連續天數只需要算一次，不用每檔股票重算，拿來當「籌碼領先」的比對基準
+    market_buy_streak = compute_market_consecutive_buy_days(institutional, institutional_history)
+
     for code, sd in stock_day.items():
         inst = institutional.get(code, {})
         inst_net = inst.get("institutional_net", 0)
@@ -1229,6 +1299,24 @@ def compute_signal_scores(stock_day, institutional, pe_pb, revenue, price_histor
             bull_tags.append(f"法人連續買超{consecutive_buy_days}天")
         if consecutive_sell_days_signal >= 3:
             bear_tags.append(f"法人連續賣超{consecutive_sell_days_signal}天")
+
+        # 新進買進：法人今天剛從「沒買/賣超」狀態轉為買超的第一天（連續買超天數剛好=1），
+        # 代表可能是新資金剛進場，跟上面「連續買超N天」（門檻3天以上，代表已經持續一陣子）
+        # 是同一件事的不同階段，不會同時觸發，一個是「剛開始」一個是「已經持續」
+        if consecutive_buy_days == 1:
+            bull_tags.append("新進買進")
+
+        # 籌碼領先：這檔股票的法人連續買超天數，比大盤整體的連續買超天數還多，
+        # 代表這檔股票的法人買盤比大盤趨勢更早開始（不是現在大家都在買、它才跟著買）。
+        # 門檻設至少連續買超2天以上才判斷，避免大盤才剛開始買、個股也只買1天，
+        # 兩邊天數都是1沒有比較意義的情況被誤判成領先
+        if consecutive_buy_days >= 2 and consecutive_buy_days > market_buy_streak:
+            bull_tags.append("籌碼領先")
+
+        # 低吸背離：股價破底但成交量沒有跟著放大（賣壓衰竭型態），純資訊性標籤，
+        # 跟「超賣反彈候選」是不同角度的底部訊號（那個看急殺+爆量，這個看破底+量縮）
+        if compute_low_divergence(close, sd["volume"], price_history.get(code, []), volume_history.get(code, [])):
+            bull_tags.append("低吸背離")
 
         # ATR波動風險：跟 compute_risk_scores 用同一套振幅門檻（RISK_AMPLITUDE_PCT），
         # 純資訊性標籤，不影響 net_signal 計分。風險頁本來就有算這個振幅（atr_pct），
