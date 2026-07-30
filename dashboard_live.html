@@ -473,6 +473,59 @@
   </div>
 </div>
 
+<!-- ============ PAGE 6: 紙上交易 ============ -->
+<div class="page" id="page-paper-trade">
+  <div class="page-title">📝 紙上交易模擬
+    <span class="global-badge" id="paper-status-badge">載入中…</span>
+  </div>
+  <div class="subtitle-box">
+    模擬帳戶，完全不連線券商、不動用真錢，純粹驗證訊號分數的實際交易表現：
+    只買「強多候選」、停利 +5% / 停損 -3%、資金平均分配給當天所有入選股票（允許零股）。
+    決策時序：T日收盤後的訊號，在 T+1 開盤價成交，避免用到未來資料。
+  </div>
+
+  <div class="kpi-row">
+    <div class="kpi"><div class="label">起始資金</div><div class="value" id="paper-kpi-initial">-</div></div>
+    <div class="kpi"><div class="label">總權益</div><div class="value" id="paper-kpi-equity">-</div></div>
+    <div class="kpi"><div class="label">累積報酬率</div><div class="value" id="paper-kpi-return">-</div></div>
+    <div class="kpi"><div class="label">目前持倉檔數</div><div class="value" id="paper-kpi-positions">-</div></div>
+  </div>
+
+  <div class="page-title" style="font-size:15px;">📈 每日權益走勢</div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>日期</th><th>現金</th><th>持股市值</th><th>總權益</th><th>持倉檔數</th><th>累積報酬率</th></tr>
+      </thead>
+      <tbody id="paper-equity-body"></tbody>
+    </table>
+  </div>
+
+  <div class="page-title" style="font-size:15px;margin-top:20px;">💼 目前持倉</div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>代號</th><th>名稱</th><th>進場日</th><th>進場價</th><th>股數</th><th>最新收盤</th><th>未實現損益%</th><th>狀態</th></tr>
+      </thead>
+      <tbody id="paper-positions-body"></tbody>
+    </table>
+  </div>
+
+  <div class="page-title" style="font-size:15px;margin-top:20px;">📋 交易紀錄</div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>日期</th><th>代號</th><th>名稱</th><th>買/賣</th><th>價格</th><th>股數</th><th>金額</th><th>備註</th></tr>
+      </thead>
+      <tbody id="paper-trades-body"></tbody>
+    </table>
+  </div>
+
+  <div class="footer-bar">
+    <span>資料來源：Supabase paper_account / paper_positions / paper_trade_log / paper_daily_equity</span>
+  </div>
+</div>
+
 <script>
 // =====================================================
 // Supabase 連線設定 —— 請填入你自己的專案資訊
@@ -516,6 +569,7 @@ const tabs = [
   {id:'page-risk', icon:'⚠', label:'風險'},
   {id:'page-global', icon:'🌍', label:'全球'},
   {id:'page-institutional', icon:'🏦', label:'三大法人'},
+  {id:'page-paper-trade', icon:'📝', label:'紙上交易'},
 ];
 const tabsEl = document.getElementById('tabs');
 tabs.forEach((t,i)=>{
@@ -962,6 +1016,148 @@ async function loadStatus() {
   }
 }
 
+// ---------- Page 6: 紙上交易 ----------
+// 資料來源：Supabase paper_account / paper_positions / paper_trade_log / paper_daily_equity
+let paperAccount = null;
+let paperEquityHistory = [];
+let paperPositions = [];
+let paperTrades = [];
+let paperLatestCloseByCode = {};
+
+async function loadPaperTradeData() {
+  const [accountRaw, equityRaw, positionsRaw, tradesRaw] = await Promise.all([
+    sb('paper_account', 'id=eq.1&limit=1'),
+    sb('paper_daily_equity', 'order=trade_date.desc&limit=60'),
+    sb('paper_positions', "status=in.(open,pending_exit)&order=entry_date.desc"),
+    sb('paper_trade_log', 'order=trade_date.desc,id.desc&limit=100'),
+  ]);
+  paperAccount = accountRaw && accountRaw[0] ? accountRaw[0] : null;
+  paperEquityHistory = equityRaw || [];
+  paperPositions = positionsRaw || [];
+  paperTrades = tradesRaw || [];
+
+  // 持倉的未實現損益要對照最新收盤價，跟 stock_daily 抓最新一批資料比對
+  const codes = [...new Set(paperPositions.map(p => p.code))];
+  if (codes.length > 0) {
+    const priceRows = await sb('stock_daily', 'order=trade_date.desc&limit=2000');
+    paperLatestCloseByCode = {};
+    priceRows.forEach(r => {
+      if (codes.includes(r.code) && !(r.code in paperLatestCloseByCode)) {
+        paperLatestCloseByCode[r.code] = r.close;
+      }
+    });
+  } else {
+    paperLatestCloseByCode = {};
+  }
+}
+
+function fmtMoney(v) {
+  if (v === null || v === undefined) return '-';
+  return Math.round(v).toLocaleString();
+}
+
+function renderPaperTrade() {
+  const badge = document.getElementById('paper-status-badge');
+  if (!paperAccount) {
+    badge.textContent = '尚未初始化（等第一次排程執行）';
+  } else {
+    badge.textContent = `最後更新：${paperAccount.updated_at ? paperAccount.updated_at.slice(0,10) : '-'}`;
+  }
+
+  const latestEquity = paperEquityHistory[0];
+  document.getElementById('paper-kpi-initial').textContent =
+    paperAccount ? fmtMoney(paperAccount.initial_capital) : '-';
+  document.getElementById('paper-kpi-equity').textContent =
+    latestEquity ? fmtMoney(latestEquity.total_equity) : '-';
+  const returnEl = document.getElementById('paper-kpi-return');
+  if (latestEquity && latestEquity.cumulative_return_pct !== null && latestEquity.cumulative_return_pct !== undefined) {
+    returnEl.innerHTML = fmtPct(latestEquity.cumulative_return_pct);
+  } else {
+    returnEl.textContent = '-';
+  }
+  document.getElementById('paper-kpi-positions').textContent =
+    paperPositions.filter(p => p.status === 'open').length;
+
+  // 每日權益走勢
+  const equityBody = document.getElementById('paper-equity-body');
+  if (paperEquityHistory.length === 0) {
+    equityBody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--sub);padding:20px;">尚無資料，等排程執行過至少一次後會出現</td></tr>';
+  } else {
+    equityBody.innerHTML = '';
+    paperEquityHistory.forEach(r => {
+      const tr = document.createElement('tr');
+      const returnHtml = (r.cumulative_return_pct !== null && r.cumulative_return_pct !== undefined)
+        ? fmtPct(r.cumulative_return_pct) : '-';
+      tr.innerHTML = `
+        <td class="num">${r.trade_date}</td>
+        <td class="num">${fmtMoney(r.cash)}</td>
+        <td class="num">${fmtMoney(r.holdings_value)}</td>
+        <td class="num">${fmtMoney(r.total_equity)}</td>
+        <td class="num">${r.num_positions}</td>
+        <td class="num">${returnHtml}</td>
+      `;
+      equityBody.appendChild(tr);
+    });
+  }
+
+  // 目前持倉
+  const positionsBody = document.getElementById('paper-positions-body');
+  if (paperPositions.length === 0) {
+    positionsBody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--sub);padding:20px;">目前沒有持倉</td></tr>';
+  } else {
+    positionsBody.innerHTML = '';
+    paperPositions.forEach(p => {
+      const latestClose = paperLatestCloseByCode[p.code];
+      const entryPrice = p.entry_price;
+      let pnlHtml = '<span style="color:var(--sub)">資料不足</span>';
+      if (latestClose && entryPrice) {
+        const pnlPct = (latestClose - entryPrice) / entryPrice * 100;
+        pnlHtml = fmtPct(pnlPct);
+      }
+      const statusLabel = p.status === 'pending_exit'
+        ? '<span class="badge pullback">待出場</span>'
+        : '<span class="badge watch">持有中</span>';
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td class="num">${p.code}</td>
+        <td>${p.name || '-'}</td>
+        <td class="num">${p.entry_date}</td>
+        <td class="num">${entryPrice != null ? entryPrice.toFixed(2) : '-'}</td>
+        <td class="num">${p.quantity != null ? Math.round(p.quantity).toLocaleString() : '-'}</td>
+        <td class="num">${latestClose != null ? latestClose.toFixed(2) : '-'}</td>
+        <td class="num">${pnlHtml}</td>
+        <td>${statusLabel}</td>
+      `;
+      positionsBody.appendChild(tr);
+    });
+  }
+
+  // 交易紀錄
+  const tradesBody = document.getElementById('paper-trades-body');
+  if (paperTrades.length === 0) {
+    tradesBody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--sub);padding:20px;">尚無交易紀錄</td></tr>';
+  } else {
+    tradesBody.innerHTML = '';
+    paperTrades.forEach(t => {
+      const actionLabel = t.action === 'buy'
+        ? '<span class="badge bull">買進</span>'
+        : '<span class="badge avoid">賣出</span>';
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td class="num">${t.trade_date}</td>
+        <td class="num">${t.code}</td>
+        <td>${t.name || '-'}</td>
+        <td>${actionLabel}</td>
+        <td class="num">${t.price != null ? t.price.toFixed(2) : '-'}</td>
+        <td class="num">${t.quantity != null ? Math.round(t.quantity).toLocaleString() : '-'}</td>
+        <td class="num">${fmtMoney(t.amount)}</td>
+        <td style="white-space:normal;max-width:260px;">${t.reason || ''}</td>
+      `;
+      tradesBody.appendChild(tr);
+    });
+  }
+}
+
 async function refreshData(){
   await Promise.all([
     loadStatus(),
@@ -971,6 +1167,7 @@ async function refreshData(){
     loadGlobalData(),
     loadLiquidityData(),
     loadInstitutionalData(),
+    loadPaperTradeData(),
   ]);
   renderSignal();
   renderExplosion();
@@ -980,6 +1177,7 @@ async function refreshData(){
   renderMarket();
   renderTaiexStrip();
   renderInstitutional();
+  renderPaperTrade();
 }
 
 // 頁面載入時先跑一次
