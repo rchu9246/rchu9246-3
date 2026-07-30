@@ -1036,13 +1036,18 @@ async function loadPaperTradeData() {
   paperPositions = positionsRaw || [];
   paperTrades = tradesRaw || [];
 
-  // 持倉的未實現損益要對照最新收盤價，跟 stock_daily 抓最新一批資料比對
+  // 持倉的未實現損益要對照最新收盤價。這裡刻意只查「持倉這幾檔股票代號」的資料，
+  // 不是整張 stock_daily 表撈最新N筆——因為 stock_daily 一天就有1373筆，
+  // 撈「最新2000筆」實際上會被 PostgREST 的伺服器端上限砍到1000筆，
+  // 排序又只靠日期沒有靠代號，可能剛好漏掉某幾檔要查的股票，導致查不到收盤價。
+  // 用 code=in.(...) 篩選鎖定只要的那幾檔，資料量小很多，不會被砍到。
   const codes = [...new Set(paperPositions.map(p => p.code))];
   if (codes.length > 0) {
-    const priceRows = await sb('stock_daily', 'order=trade_date.desc&limit=2000');
+    const codeFilter = codes.join(',');
+    const priceRows = await sb('stock_daily', `code=in.(${codeFilter})&order=trade_date.desc&limit=500`);
     paperLatestCloseByCode = {};
     priceRows.forEach(r => {
-      if (codes.includes(r.code) && !(r.code in paperLatestCloseByCode)) {
+      if (!(r.code in paperLatestCloseByCode)) {
         paperLatestCloseByCode[r.code] = r.close;
       }
     });
