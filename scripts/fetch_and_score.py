@@ -759,6 +759,64 @@ def compute_rebound_candidates(stock_day, volume_history):
     return rows
 
 
+WEAKENING_SELL_DAYS_THRESHOLD = 3   # 連續賣超天數門檻
+WEAKENING_VOL_RATIO_THRESHOLD = 1.5  # 量比達這個值以上視為有止跌訊號，不算轉弱觀察
+
+
+def compute_weakening_watchlist(stock_day, volume_history, institutional, institutional_history, price_history):
+    """挑出「轉弱觀察」名單：法人連續賣超天數達門檻、且近5日股價淨下跌、且沒有
+    明顯放量止跌訊號（量比未達門檻）都同時成立的股票——代表法人持續在賣、股價
+    也真的走弱、還沒看到止跌跡象，是比單純「連續賣超」更嚴格的一份子集合。
+
+    這份名單刻意獨立於 risk_scores 現有的計分門檻（score>=60才列入）之外，因為
+    「轉弱觀察」看的是連續賣超+價跌+量縮這三個條件本身，不是綜合風險分數——
+    一檔股票可能單日分數不到風險示警的門檻，但已經連續好幾天在轉弱，這種情況
+    也值得被看到，不應該因為單日分數不夠高就被排除在外。
+
+    必要條件（都要成立）：
+      1. 法人連續賣超天數 >= WEAKENING_SELL_DAYS_THRESHOLD
+      2. 近5個交易日股價淨下跌（沒有5日歷史資料時直接排除，不用不確定的資料硬湊）
+      3. 量比 < WEAKENING_VOL_RATIO_THRESHOLD（沒有明顯放量止跌訊號；量比資料
+         不足時，保守起見不排除——因為「不確定有沒有爆量」不等於「確定沒有爆量」，
+         但也不能證明有爆量止跌，兩害相權取其輕，讓它通過這一關，不因缺資料而
+         漏掉真正值得觀察的轉弱股票）
+    """
+    rows = []
+    for code, sd in stock_day.items():
+        close, vol = sd["close"], sd["volume"]
+        if close <= 0:
+            continue
+        inst = institutional.get(code, {})
+        inst_net = inst.get("institutional_net", 0)
+        consecutive_sell_days = compute_consecutive_sell_days(inst_net, institutional_history.get(code, []))
+        if consecutive_sell_days < WEAKENING_SELL_DAYS_THRESHOLD:
+            continue
+
+        hist_with_today = price_history.get(code, []) + [(TODAY, close)]
+        pct_5d = pct_change_n_days_ago(hist_with_today, 5)
+        if pct_5d is None or pct_5d >= 0:
+            continue  # 沒有5日歷史資料，或近5日股價其實是漲的，不算轉弱
+
+        vol_ratio = compute_vol_ratio(vol, volume_history.get(code, []))
+        if vol_ratio is not None and vol_ratio >= WEAKENING_VOL_RATIO_THRESHOLD:
+            continue  # 有明顯放量，可能是止跌訊號，不算「還沒止跌」的轉弱觀察
+
+        rows.append({
+            "code": code,
+            "name": sd["name"],
+            "trade_date": TODAY,
+            "close": close,
+            "consecutive_sell_days": consecutive_sell_days,
+            "pct_5d": pct_5d,
+            "vol_ratio_20": vol_ratio,
+            "note": f"法人連賣{consecutive_sell_days}天，近5日跌{abs(pct_5d):.2f}%，"
+                    f"量比{f'{vol_ratio:.2f}倍' if vol_ratio is not None else '資料不足'}",
+        })
+
+    rows.sort(key=lambda r: r["consecutive_sell_days"], reverse=True)
+    return rows
+
+
 def compute_liquidity_scores(stock_day, volume_history, min_days=3, risk_threshold_pct=50.0):
     """交易性風險 / 流動性：算「100張（10萬股）這筆單量，佔該股平均每日成交量的百分比」，
     比例越高代表流動性越差（一筆不大的單就可能吃掉一整天的量，賣的時候容易砸自己的價）。
@@ -1674,6 +1732,10 @@ def main():
     rebound_rows = compute_rebound_candidates(stock_day, volume_history)
     print(f"  產出 {len(rebound_rows)} 筆（短線急殺+爆量者）")
 
+    print("計算轉弱觀察名單...")
+    weakening_rows = compute_weakening_watchlist(stock_day, volume_history, institutional, institutional_history, price_history)
+    print(f"  產出 {len(weakening_rows)} 筆（連續賣超+價跌+量縮者）")
+
     # 個股每日快照（給歷史查詢用，可選）
     daily_rows = []
     for code, sd in stock_day.items():
@@ -1698,6 +1760,7 @@ def main():
     supabase_upsert("global_factors", global_rows, "factor_code,trade_date")
     supabase_upsert("liquidity_scores", liquidity_rows, "code,trade_date")
     supabase_upsert("rebound_candidates", rebound_rows, "code,trade_date")
+    supabase_upsert("weakening_watchlist", weakening_rows, "code,trade_date")
 
     # 回測必須排在 stock_daily 寫入「之後」才算——回測驗證「昨天的推薦」用的是
     # 「今天的開盤價」，而今天的開盤價要等上面 stock_daily 那行 upsert 完成後，
