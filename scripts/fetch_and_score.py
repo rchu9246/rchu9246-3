@@ -566,6 +566,52 @@ def fetch_taifex_futures_night_session(contract="TX"):
     return {"close": last, "chg_pct": chg_pct, "contract_month": near_month}
 
 
+# 隔夜開盤綜合分數的權重：台指期夜盤最直接反映開盤預期，給最高權重；
+# 費半SOX是台股電子/半導體權重股的重要驅動，次之；美元/台幣貶值通常代表外資
+# 壓力偏空，給最低權重且方向要反過來算（USD/TWD 上漲=台幣貶值=偏空）。
+# 這是簡化版權重，之後可以依實際回測（隔夜分數 vs 隔日開盤表現）調整。
+OVERNIGHT_WEIGHTS = {"TXF_NIGHT": 0.50, "^SOX": 0.35, "TWD=X": -0.15}
+
+OVERNIGHT_VERDICT_THRESHOLDS = [
+    (1.0, "強偏多開盤"),
+    (0.3, "偏多開盤"),
+    (-0.3, "中性開盤"),
+    (-1.0, "偏空開盤"),
+]
+
+
+def compute_overnight_composite(factor_rows):
+    """把已經算好的隔夜因子（台指期夜盤、SOX、美元/台幣）依權重合併成一個綜合分數，
+    再轉成一句話判讀，不用每次都自己解讀好幾個獨立因子的方向。
+
+    factor_rows: compute_global_factors() 目前已經組好的 rows 列表（含 TXF_NIGHT、
+      ^SOX、TWD=X 這幾筆），從裡面撈出 chg_pct 來加權——沒有另外重抓資料。
+    缺任何一個因子時，只用抓得到的那幾個因子、依各自權重佔比重新正規化（例如
+    只有兩個因子有資料，就用那兩個因子的權重比例重算），避免因子缺一個就整個
+    不給分數；所有因子都缺時回傳 None。
+    """
+    by_code = {r["factor_code"]: r for r in factor_rows}
+    available = []
+    for code, weight in OVERNIGHT_WEIGHTS.items():
+        row = by_code.get(code)
+        if row and row.get("chg_pct") is not None:
+            available.append((weight, row["chg_pct"]))
+
+    if not available:
+        return None, "資料不足"
+
+    total_abs_weight = sum(abs(w) for w, _ in available)
+    composite_score = round(sum(w * chg for w, chg in available) / total_abs_weight, 1)
+
+    verdict = "強偏空開盤"
+    for threshold, label in OVERNIGHT_VERDICT_THRESHOLDS:
+        if composite_score >= threshold:
+            verdict = label
+            break
+
+    return composite_score, verdict
+
+
 def compute_global_factors(stock_day, price_history):
     rows = []
 
@@ -627,6 +673,17 @@ def compute_global_factors(stock_day, price_history):
             "direction": direction, "impact_score": None,
             "note": f"契約月份 {night_fut['contract_month']}，最直接反映台股隔日開盤預期",
         })
+
+    # 隔夜開盤綜合分數：把上面剛算好的台指期夜盤/SOX/美元台幣依權重合併成一個分數，
+    # 要放在這三個因子都已經 append 進 rows 之後才能算，因為它是從 rows 裡撈資料，
+    # 不是另外重抓
+    composite_score, composite_verdict = compute_overnight_composite(rows)
+    rows.append({
+        "factor_code": "OVERNIGHT_COMPOSITE", "trade_date": TODAY, "category": "綜合",
+        "factor_name": "隔夜開盤綜合", "value": composite_score, "chg_pct": composite_score,
+        "direction": composite_verdict, "impact_score": None,
+        "note": "由 台指期夜盤(50%) + 費半SOX(35%) + 美元/台幣(15%，反向) 依可取得的因子加權計算，簡化版公式僅供參考",
+    })
 
     # 3. 台股掛牌的美股/原物料 ETF（資料已經在 stock_day 裡，只是重新整理格式）
     for code, meta in GLOBAL_ETF_MAP.items():
