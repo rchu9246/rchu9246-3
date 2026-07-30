@@ -231,18 +231,19 @@ def main():
     # 允許零股（不強制整張1000股）：10萬元本金分配給多檔候選時，常常不夠買一整張，
     # 用零股方式才能實際分散到多檔股票。真實下單零股有交易時段限制（盤中/盤後零股），
     # 跟整張不是同一個交易機制，這裡是簡化模擬，先不模擬這個交易機制上的差異。
+    executed_buys = []  # 記錄這次真的成功買進的 (code, trade_date)，只有這些才會從待買清單刪除
     if pending_buys:
         capital_per_stock = cash / len(pending_buys)
         for b in pending_buys:
             price_info = prices.get(b["code"])
             if not price_info or not price_info["open"]:
-                print(f"[WARN] {b['code']} 沒有今天的開盤價，這次跳過買進")
+                print(f"[WARN] {b['code']} 沒有今天的開盤價，這次跳過買進（留在待買清單，下次執行再試）")
                 continue
             entry_price = price_info["open"]
             quantity = int(capital_per_stock // entry_price)  # 允許零股，最小單位1股
             if quantity <= 0:
                 print(f"[WARN] {b['code']} 分配資金 {capital_per_stock:.0f} 元不夠買 1 股"
-                      f"（{entry_price} 元/股），跳過")
+                      f"（{entry_price} 元/股），跳過（留在待買清單，下次執行再試）")
                 continue
             amount = entry_price * quantity
             cash -= amount
@@ -257,11 +258,13 @@ def main():
                 "exit_date": None, "exit_price": None, "pnl_pct": None,
             }], "code,entry_date")
             print(f"[BUY] {b['code']} {b.get('name')}：{quantity:.0f}股 @ {entry_price}")
+            executed_buys.append((b["code"], b["trade_date"]))
 
-        # 待買清單已經處理完，清掉這批（用訊號日期篩選，避免刪到還沒處理的其他批次）
-        signal_dates = set(b["trade_date"] for b in pending_buys)
-        for d in signal_dates:
-            supabase_delete("paper_pending_buys", f"trade_date=eq.{d}")
+        # 只刪除「這次真的成功買進」的那幾筆，抓不到開盤價、或資金不夠買的那些
+        # 繼續留在 paper_pending_buys 裡，下次執行時會自動再嘗試一次，不會被整批
+        # 連坐刪除、白白遺失一個原本有效的訊號
+        for code, trade_date_str in executed_buys:
+            supabase_delete("paper_pending_buys", f"code=eq.{code}&trade_date=eq.{trade_date_str}")
 
     if trade_log:
         supabase_insert("paper_trade_log", trade_log)
