@@ -515,21 +515,27 @@ def fetch_taifex_futures_night_session(contract="TX"):
     TradingSession 這個欄位「夜盤」實際會寫哪個字串，所以用關鍵字比對抓「非日盤」
     的那筆，並且把這次抓到的所有 TradingSession 值印出來，方便部署後對照 log
     確認比對邏輯有沒有抓對——如果沒抓對，之後可以照實際印出來的值調整關鍵字。
+
+    回傳：(data, status, detail)，跟 fetch_institutional_t86 用同一套設計，
+    讓這個資料源的失敗原因也能被追蹤、而不是每次失敗都長得一樣。
+      data   : {"close":..., "chg_pct":..., "contract_month":...}，失敗時為 None
+      status : "ok" | "network_error" | "format_error" | "contract_not_found" | "session_not_matched"
+      detail : 給人看的補充說明，成功時為 None
     """
     try:
         data = http_get_json("https://openapi.taifex.com.tw/v1/DailyMarketReportFut", timeout=20, retries=1)
     except Exception as e:
         print(f"[WARN] 期交所台指期資料抓取失敗：{e}")
-        return None
+        return None, "network_error", str(e)
 
     if not isinstance(data, list) or not data:
         print("[WARN] 期交所台指期資料格式異常（預期是非空陣列）")
-        return None
+        return None, "format_error", "回傳內容不是非空陣列"
 
     tx_rows = [r for r in data if str(r.get("Contract", "")).strip() == contract]
     if not tx_rows:
         print(f"[WARN] 期交所資料裡找不到 {contract} 合約")
-        return None
+        return None, "contract_not_found", f"回傳資料裡沒有 Contract={contract} 的列"
 
     sessions_seen = sorted(set(str(r.get("TradingSession", "")) for r in tx_rows))
     print(f"[INFO] {contract} 這次抓到的 TradingSession 值：{sessions_seen}（用來核對夜盤比對邏輯有沒有抓對）")
@@ -548,9 +554,9 @@ def fetch_taifex_futures_night_session(contract="TX"):
         None,
     )
     if night_row is None:
-        print(f"[WARN] {contract} 近月合約找不到符合夜盤關鍵字的資料列，"
-              f"TradingSession值：{[r.get('TradingSession') for r in near_month_rows]}")
-        return None
+        detail = f"TradingSession值：{[r.get('TradingSession') for r in near_month_rows]}"
+        print(f"[WARN] {contract} 近月合約找不到符合夜盤關鍵字的資料列，{detail}")
+        return None, "session_not_matched", detail
 
     last = safe_float(night_row.get("Last"))
     chg_pct_raw = night_row.get("%")
@@ -562,8 +568,8 @@ def fetch_taifex_futures_night_session(contract="TX"):
         if last and (last - change):
             chg_pct = round(change / (last - change) * 100, 2)
     if not last:
-        return None
-    return {"close": last, "chg_pct": chg_pct, "contract_month": near_month}
+        return None, "format_error", "夜盤那筆資料的 Last（成交價）是空值或0"
+    return {"close": last, "chg_pct": chg_pct, "contract_month": near_month}, "ok", None
 
 
 # 隔夜開盤綜合分數的權重：台指期夜盤最直接反映開盤預期，給最高權重；
@@ -663,7 +669,7 @@ def compute_global_factors(stock_day, price_history):
                 "direction": direction, "impact_score": None, "note": note,
             })
 
-    night_fut = fetch_taifex_futures_night_session()
+    night_fut, night_status, night_detail = fetch_taifex_futures_night_session()
     if night_fut:
         chg_pct = night_fut["chg_pct"]
         direction = "中性" if chg_pct is None else ("偏多" if chg_pct > 0 else ("偏空" if chg_pct < 0 else "中性"))
@@ -672,6 +678,16 @@ def compute_global_factors(stock_day, price_history):
             "factor_name": "台指期近月(夜盤)", "value": night_fut["close"], "chg_pct": chg_pct,
             "direction": direction, "impact_score": None,
             "note": f"契約月份 {night_fut['contract_month']}，最直接反映台股隔日開盤預期",
+        })
+    else:
+        # 失敗時也留一筆紀錄，寫進 note 的狀態原因，而不是整筆省略——省略的話事後
+        # 只能翻 log 猜為什麼今天缺這個因子，留紀錄在資料庫裡比較好追蹤，跟 T86
+        # 抓不到資料時仍寫 institutional_status 是同一個設計理念
+        rows.append({
+            "factor_code": "TXF_NIGHT", "trade_date": TODAY, "category": "台指期夜盤",
+            "factor_name": "台指期近月(夜盤)", "value": None, "chg_pct": None,
+            "direction": "資料異常", "impact_score": None,
+            "note": f"抓取失敗（狀態：{night_status}）：{night_detail}",
         })
 
     # 隔夜開盤綜合分數：把上面剛算好的台指期夜盤/SOX/美元台幣依權重合併成一個分數，
