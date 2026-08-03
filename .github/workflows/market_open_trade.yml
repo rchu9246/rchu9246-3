@@ -1,0 +1,24 @@
+name: 開盤後真實下單
+on:
+  schedule:
+    - cron: '5 1 * * 1-5'
+  workflow_dispatch: {}
+jobs:
+  execute:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 安裝 shioaji
+        run: pip install shioaji
+      - name: 執行 Shioaji 真實下單（模擬環境）
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SHIOAJI_API_KEY: ${{ secrets.SHIOAJI_API_KEY }}
+          SHIOAJI_SECRET_KEY: ${{ secrets.SHIOAJI_SECRET_KEY }}
+          SHIOAJI_CA_BASE64: ${{ secrets.SHIOAJI_CA_BASE64 }}
+          SHIOAJI_CA_PASSWORD: ${{ secrets.SHIOAJI_CA_PASSWORD }}
+        run: python scripts/shioaji_execute.py
