@@ -180,7 +180,21 @@ def setup_shioaji():
     print(f"登入成功，帳戶：{accounts}")
 
     if SHIOAJI_CA_BASE64 and SHIOAJI_CA_PASSWORD:
-        ca_bytes = base64.b64decode(SHIOAJI_CA_BASE64)
+        # 清除可能夾帶的空白/換行字元，並自動補齊結尾的 padding（=號）——
+        # 複製貼上很長的 base64 字串時，常常會不小心在結尾漏掉一兩個 = 號，
+        # 這是可以安全補回去的（padding 只影響字串結尾的解讀方式，不影響
+        # 前面實際的內容），能解決最常見的「Incorrect padding」錯誤。
+        ca_base64_clean = SHIOAJI_CA_BASE64.strip().replace("\n", "").replace("\r", "").replace(" ", "")
+        missing_padding = len(ca_base64_clean) % 4
+        if missing_padding:
+            ca_base64_clean += "=" * (4 - missing_padding)
+        try:
+            ca_bytes = base64.b64decode(ca_base64_clean)
+        except Exception as e:
+            print(f"[FATAL] SHIOAJI_CA_BASE64 解碼失敗：{e}")
+            print(f"  目前字串長度：{len(ca_base64_clean)}（正常的 .pfx 憑證轉 base64 後，"
+                  f"長度通常有幾千字元以上，如果這個數字看起來明顯太短，代表複製貼上時可能被截斷了）")
+            sys.exit(1)
         with tempfile.NamedTemporaryFile(suffix=".pfx", delete=False) as f:
             f.write(ca_bytes)
             ca_path = f.name
