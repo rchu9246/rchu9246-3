@@ -16,8 +16,8 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python scripts/fetch_and_score.py
-      - name: 執行紙上交易模擬
+      - name: 執行收盤後交易決策
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python scripts/paper_trade.py
+        run: python scripts/decide_trades.py
