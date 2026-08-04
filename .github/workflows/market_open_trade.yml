@@ -1,7 +1,7 @@
 name: 開盤後真實下單
 on:
   schedule:
-    - cron: '5 1 * * 1-5'
+    - cron: '*/5 * * * *'
   workflow_dispatch: {}
 jobs:
   execute:
@@ -11,9 +11,21 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: 判斷是否在下單時段（週一到週五 09:10-13:30 台北時間）
+        id: gate
+        run: |
+          hour_min=$(TZ='Asia/Taipei' date +%H%M)
+          weekday=$(TZ='Asia/Taipei' date +%u)
+          if [ "$weekday" -ge 1 ] && [ "$weekday" -le 5 ] && [ "10#$hour_min" -ge 910 ] && [ "10#$hour_min" -le 1330 ]; then
+            echo "in_session=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "in_session=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: 安裝 shioaji
+        if: steps.gate.outputs.in_session == 'true'
         run: pip install shioaji
       - name: 執行 Shioaji 真實下單（模擬環境）
+        if: steps.gate.outputs.in_session == 'true'
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
