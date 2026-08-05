@@ -24,6 +24,9 @@ Shioaji 真實下單執行腳本（shioaji_execute.py）
      也不會留到隔天造成重複下單的風險。
   3. 目前是模擬環境（simulation=True），不會動用真實資金；要接正式環境
      （simulation=False）需要另外評估風險並取得使用者明確同意。
+  4. 送出委託（api.place_order）如果逾時或連線異常，會自動重試最多
+     PLACE_ORDER_MAX_RETRIES 次；單一檔股票重試全部失敗後，會跳過該檔、
+     留在待處理清單等下次執行再試，不會讓整支腳本中止、影響其他檔股票。
 """
 
 import os
@@ -47,6 +50,9 @@ SHIOAJI_CA_PASSWORD = os.environ.get("SHIOAJI_CA_PASSWORD", "")
 TODAY = date.today().isoformat()
 
 FILL_CHECK_WAIT_SECONDS = 8  # 送出委託後，等幾秒再查一次成交狀態
+
+PLACE_ORDER_MAX_RETRIES = 3       # 下單逾時/失敗時最多重試次數
+PLACE_ORDER_RETRY_BASE_SLEEP = 5  # 重試間隔秒數（每次重試遞增：5s, 10s, 15s...）
 
 
 # --------------------------------------------------------------------------
@@ -215,6 +221,11 @@ def place_and_check(api, sj, contract, action, quantity, reference_price):
     """送出一筆盤中零股限價單，等幾秒後查一次成交狀態，回傳 (filled_qty, filled_price, order_id, status_str)。
     filled_qty 可能小於 quantity（部分成交）或等於 0（完全沒成交，這次執行沒查到成交，
     不代表訂單一定不會成交——訂單在收盤前都還有效，只是我們這次沒等到）。
+
+    送出委託（api.place_order）如果逾時或連線異常，會自動重試最多
+    PLACE_ORDER_MAX_RETRIES 次；重試間隔隨次數遞增，避免對方伺服器忙碌時
+    連續高頻重試造成反效果。全部重試都失敗的話，會往外拋出例外，由呼叫端
+    （main 裡的迴圈）決定要跳過這一檔、留給下次執行再處理。
     """
     order = api.Order(
         price=reference_price,
@@ -225,182 +236,16 @@ def place_and_check(api, sj, contract, action, quantity, reference_price):
         order_lot=sj.constant.StockOrderLot.IntradayOdd,
         account=api.stock_account,
     )
-    trade = api.place_order(contract, order)
-    order_id = trade.status.id if trade and trade.status else None
-    print(f"  委託送出：{action} {quantity}股 @ {reference_price}，order_id={order_id}")
 
-    time.sleep(FILL_CHECK_WAIT_SECONDS)
-    api.update_status()
-
-    filled_qty, filled_amount = 0, 0.0
-    deals = getattr(trade.status, "deals", None) or []
-    for d in deals:
-        deal_qty = getattr(d, "quantity", None) or d.get("quantity", 0) if isinstance(d, dict) else 0
-        deal_price = getattr(d, "price", None) or d.get("price", 0) if isinstance(d, dict) else 0
-        filled_qty += deal_qty
-        filled_amount += deal_qty * deal_price
-
-    filled_price = round(filled_amount / filled_qty, 2) if filled_qty > 0 else None
-    status_str = str(trade.status.status) if trade and trade.status else "unknown"
-    return filled_qty, filled_price, order_id, status_str
-
-
-# --------------------------------------------------------------------------
-# 主流程
-# --------------------------------------------------------------------------
-
-def main():
-    print(f"=== 開始執行 {TODAY} Shioaji 真實下單（模擬環境） ===")
-
-    api, sj = setup_shioaji()
-
-    account = get_account()
-    cash = safe_float(account.get("cash"), 100000.0) if account else 100000.0
-    initial_capital = safe_float(account.get("initial_capital"), 100000.0) if account else 100000.0
-    print(f"目前現金（我方帳本紀錄）：{cash:,.0f} 元")
-
-    positions = get_positions()
-    pending_buys = get_pending_buys()
-    print(f"待出場：{len([p for p in positions if p['status']=='pending_exit'])} 檔"
-          f"；待買清單：{len(pending_buys)} 檔")
-
-    trade_log = []
-
-    # ------------------------------------------------------------------
-    # 賣出被標記 pending_exit 的部位
-    # ------------------------------------------------------------------
-    to_close = [p for p in positions if p["status"] == "pending_exit"]
-    for p in to_close:
-        code = p["code"]
+    trade = None
+    last_error = None
+    for attempt in range(1, PLACE_ORDER_MAX_RETRIES + 1):
         try:
-            contract = api.Contracts.Stocks[code]
+            trade = api.place_order(contract, order)
+            last_error = None
+            break
         except Exception as e:
-            print(f"[WARN] {code} 找不到合約資料：{e}，跳過（留在 pending_exit，下次再試）")
-            continue
-        quantity = int(safe_float(p["quantity"]))
-        if quantity <= 0:
-            continue
-        reference_price = contract.reference
-        filled_qty, filled_price, order_id, status_str = place_and_check(
-            api, sj, contract, sj.constant.Action.Sell, quantity, reference_price
-        )
-        if filled_qty <= 0:
-            print(f"[WARN] {code} 賣單目前沒有成交紀錄（狀態：{status_str}），"
-                  f"留在 pending_exit，下次執行再檢查")
-            continue
-
-        entry_price = safe_float(p["entry_price"])
-        amount = filled_qty * filled_price
-        cash += amount
-        pnl_pct = round((filled_price - entry_price) / entry_price * 100, 2) if entry_price else 0
-        trade_log.append({
-            "trade_date": TODAY, "code": code, "name": p.get("name"),
-            "action": "sell", "price": filled_price, "quantity": filled_qty, "amount": round(amount, 0),
-            "reason": f"停利/停損出場，損益 {pnl_pct:+.2f}%（Shioaji模擬成交）",
-            "order_id": order_id, "order_status": status_str,
-        })
-        if filled_qty >= quantity:
-            supabase_upsert("paper_positions", [{
-                "code": code, "entry_date": p["entry_date"], "name": p.get("name"),
-                "entry_price": entry_price, "quantity": p["quantity"], "status": "closed",
-                "exit_date": TODAY, "exit_price": filled_price, "pnl_pct": pnl_pct,
-            }], "code,entry_date")
-            print(f"[SELL] {code} {p.get('name')}：{filled_qty}股 @ {filled_price}（全部成交），損益 {pnl_pct:+.2f}%")
-        else:
-            # 部分成交：剩餘股數繼續留在 pending_exit，下次執行會再對剩餘股數送出新的賣單
-            remaining_qty = quantity - filled_qty
-            supabase_upsert("paper_positions", [{
-                "code": code, "entry_date": p["entry_date"], "name": p.get("name"),
-                "entry_price": entry_price, "quantity": remaining_qty, "status": "pending_exit",
-                "exit_date": None, "exit_price": None, "pnl_pct": None,
-            }], "code,entry_date")
-            print(f"[SELL-PARTIAL] {code}：{filled_qty}/{quantity}股成交，剩 {remaining_qty} 股留待下次")
-
-    # ------------------------------------------------------------------
-    # 買進待買清單，資金平均分配（允許零股）
-    # ------------------------------------------------------------------
-    executed_buys = []
-    if pending_buys:
-        capital_per_stock = cash / len(pending_buys)
-        for b in pending_buys:
-            code = b["code"]
-            try:
-                contract = api.Contracts.Stocks[code]
-            except Exception as e:
-                print(f"[WARN] {code} 找不到合約資料：{e}，跳過（留在待買清單，下次再試）")
-                continue
-            reference_price = contract.reference
-            if not reference_price:
-                print(f"[WARN] {code} 沒有參考價，跳過")
-                continue
-            quantity = int(capital_per_stock // reference_price)
-            if quantity <= 0:
-                print(f"[WARN] {code} 分配資金 {capital_per_stock:.0f} 元不夠買 1 股"
-                      f"（參考價 {reference_price} 元），跳過（留在待買清單，下次再試）")
-                continue
-
-            filled_qty, filled_price, order_id, status_str = place_and_check(
-                api, sj, contract, sj.constant.Action.Buy, quantity, reference_price
-            )
-            if filled_qty <= 0:
-                print(f"[WARN] {code} 買單目前沒有成交紀錄（狀態：{status_str}），"
-                      f"留在待買清單，下次執行再檢查")
-                continue
-
-            amount = filled_qty * filled_price
-            cash -= amount
-            trade_log.append({
-                "trade_date": TODAY, "code": code, "name": b.get("name"),
-                "action": "buy", "price": filled_price, "quantity": filled_qty, "amount": round(amount, 0),
-                "reason": f"強多候選訊號（{b['trade_date']}）進場（Shioaji模擬成交）",
-                "order_id": order_id, "order_status": status_str,
-            })
-            supabase_upsert("paper_positions", [{
-                "code": code, "entry_date": TODAY, "name": b.get("name"),
-                "entry_price": filled_price, "quantity": filled_qty, "status": "open",
-                "exit_date": None, "exit_price": None, "pnl_pct": None,
-            }], "code,entry_date")
-            print(f"[BUY] {code} {b.get('name')}：{filled_qty}股 @ {filled_price}"
-                  f"{'（全部成交）' if filled_qty >= quantity else f'（部分成交，原欲買{quantity}股）'}")
-            # 不管全部或部分成交，都視為這筆候選「已處理」，從待買清單移除——
-            # 跟賣出不同，因為買進的量是「用可分配資金試算出來的」，部分成交後
-            # 剩餘資金會在下次執行時重新按當時的候選清單分配，不強制湊滿原本數量
-            executed_buys.append((code, b["trade_date"]))
-
-        for code, trade_date_str in executed_buys:
-            supabase_delete("paper_pending_buys", f"code=eq.{code}&trade_date=eq.{trade_date_str}")
-
-    if trade_log:
-        supabase_insert("paper_trade_log", trade_log)
-    else:
-        print("這次執行沒有任何成交")
-
-    # ------------------------------------------------------------------
-    # 更新帳戶現金與權益快照
-    # ------------------------------------------------------------------
-    final_positions = get_positions()
-    holdings_value = 0.0
-    for p in final_positions:
-        entry_price = safe_float(p["entry_price"])
-        holdings_value += entry_price * safe_float(p["quantity"])  # 早上剛執行完，用成交價估算即可
-
-    total_equity = cash + holdings_value
-    cumulative_return_pct = round((total_equity - initial_capital) / initial_capital * 100, 2) if initial_capital else 0
-
-    supabase_upsert("paper_account", [{
-        "id": 1, "cash": round(cash, 0), "initial_capital": initial_capital,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }], "id")
-
-    supabase_upsert("paper_daily_equity", [{
-        "trade_date": TODAY, "cash": round(cash, 0), "holdings_value": round(holdings_value, 0),
-        "total_equity": round(total_equity, 0), "num_positions": len(final_positions),
-        "cumulative_return_pct": cumulative_return_pct,
-    }], "trade_date")
-
-    print(f"執行後現金：{cash:,.0f} 元，持股市值：{holdings_value:,.0f} 元，總權益：{total_equity:,.0f} 元")
-    print("=== 完成 ===")
-
-
-if __name__ == "__main__":
-    main()
+            last_error = e
+            print(f"  [WARN] 送出委託失敗（第 {attempt}/{PLACE_ORDER_MAX_RETRIES} 次嘗試）："
+                  f"{type(e).__name__}: {e}")
+            if attempt < PLACE_ORDER_MAX_RETRIES:
