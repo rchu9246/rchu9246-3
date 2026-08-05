@@ -16,7 +16,7 @@ jobs:
         run: |
           hour_min=$(TZ='Asia/Taipei' date +%H%M)
           weekday=$(TZ='Asia/Taipei' date +%u)
-          if [ "$weekday" -ge 1 ] && [ "$weekday" -le 5 ] && [ "10#$hour_min" -ge 900 ] && [ "10#$hour_min" -le 1330 ]; then
+          if [ "$weekday" -ge 1 ] && [ "$weekday" -le 5 ] && (( 10#$hour_min >= 900 )) && (( 10#$hour_min <= 1330 )); then
             echo "in_session=true" >> "$GITHUB_OUTPUT"
           else
             echo "in_session=false" >> "$GITHUB_OUTPUT"
