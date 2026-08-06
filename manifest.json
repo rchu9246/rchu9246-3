@@ -1,0 +1,15 @@
+{
+  "name": "GPT Quant V9.1 Optimization Suite",
+  "version": "1.0",
+  "modules": [
+    "Confidence Calibration",
+    "Adaptive Risk Manager v2",
+    "Portfolio Optimizer",
+    "Paper Trading Engine"
+  ],
+  "safety": {
+    "paper_only": true,
+    "live_trading": false,
+    "broker_submission": false
+  }
+}
